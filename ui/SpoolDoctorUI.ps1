@@ -4,11 +4,19 @@ param(
     [switch]$NoShow,
 
     [Parameter()]
+    [switch]$NoElevate,
+
+    [Parameter()]
+    [switch]$ElevationAttempted,
+
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$LogPath
 )
 
 Set-StrictMode -Version Latest
+
+$script:SpoolDoctorUIScriptPath = $PSCommandPath
 
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
 Add-Type -AssemblyName System.Drawing -ErrorAction Stop
@@ -203,6 +211,187 @@ function Confirm-SpoolDoctorAction {
     return ($dialogResult -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
+function Test-SpoolDoctorElevated {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity) {
+        return $false
+    }
+
+    $principal = New-Object -TypeName System.Security.Principal.WindowsPrincipal -ArgumentList $identity
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Format-SpoolDoctorProcessArgument {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return ('"{0}"' -f $escaped)
+}
+
+function Get-SpoolDoctorElevationArgumentList {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter()]
+        [string]$ScriptPath = $script:SpoolDoctorUIScriptPath,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$LogPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
+        throw 'Não foi possível determinar o caminho do script ui/SpoolDoctorUI.ps1 para relançamento.'
+    }
+
+    $argumentList = New-Object -TypeName 'System.Collections.Generic.List[string]'
+    $argumentList.Add('-NoProfile')
+    $argumentList.Add('-ExecutionPolicy')
+    $argumentList.Add('Bypass')
+    $argumentList.Add('-STA')
+    $argumentList.Add('-WindowStyle')
+    $argumentList.Add('Hidden')
+    $argumentList.Add('-File')
+    $argumentList.Add((Format-SpoolDoctorProcessArgument -Value $ScriptPath))
+    $argumentList.Add('-ElevationAttempted')
+
+    if ($PSBoundParameters.ContainsKey('LogPath') -and -not [string]::IsNullOrWhiteSpace($LogPath)) {
+        $argumentList.Add('-LogPath')
+        $argumentList.Add((Format-SpoolDoctorProcessArgument -Value $LogPath))
+    }
+
+    return $argumentList.ToArray()
+}
+
+function Test-SpoolDoctorElevationCanceled {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter()]
+        [System.Exception]$Exception
+    )
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [System.ComponentModel.Win32Exception] -and $current.NativeErrorCode -eq 1223) {
+            return $true
+        }
+        if ($current -is [System.OperationCanceledException]) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+
+    return $false
+}
+
+function Start-SpoolDoctorElevatedProcess {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$ArgumentList
+    )
+
+    if ($PSCmdlet.ShouldProcess('powershell.exe', 'Iniciar SpoolDoctor com elevação UAC (Administrador)')) {
+        Start-Process -FilePath 'powershell.exe' -Verb 'RunAs' -WindowStyle 'Hidden' -ArgumentList $ArgumentList -ErrorAction Stop
+    }
+}
+
+function Request-SpoolDoctorElevation {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter()]
+        [string]$ScriptPath = $script:SpoolDoctorUIScriptPath,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$LogPath,
+
+        [Parameter()]
+        [switch]$ElevationAttempted,
+
+        [Parameter()]
+        [switch]$NoElevate,
+
+        [Parameter()]
+        [switch]$Force
+    )
+
+    if (Test-SpoolDoctorElevated) {
+        return [PSCustomObject]@{
+            PSTypeName               = 'SpoolDoctor.ElevationResult'
+            Outcome                  = 'AlreadyElevated'
+            ShouldExitCurrentProcess = $false
+            Message                  = ''
+        }
+    }
+
+    if (-not $Force -and ($ElevationAttempted -or $NoElevate)) {
+        $reasonText = if ($ElevationAttempted) {
+            'A tentativa anterior de elevação não resultou em privilégio de Administrador (trava anti-loop ativada).'
+        }
+        else {
+            'Elevação automática desabilitada (-NoElevate).'
+        }
+
+        return [PSCustomObject]@{
+            PSTypeName               = 'SpoolDoctor.ElevationResult'
+            Outcome                  = 'Skipped'
+            ShouldExitCurrentProcess = $false
+            Message                  = "$reasonText Janela aberta em modo somente leitura. Use 'Reiniciar como Administrador' para habilitar cancelamento e reset."
+        }
+    }
+
+    $argParams = @{
+        ScriptPath = $ScriptPath
+    }
+    if ($PSBoundParameters.ContainsKey('LogPath') -and -not [string]::IsNullOrWhiteSpace($LogPath)) {
+        $argParams['LogPath'] = $LogPath
+    }
+
+    try {
+        $elevationArgs = @(Get-SpoolDoctorElevationArgumentList @argParams)
+        Start-SpoolDoctorElevatedProcess -ArgumentList $elevationArgs -Confirm:$false
+
+        return [PSCustomObject]@{
+            PSTypeName               = 'SpoolDoctor.ElevationResult'
+            Outcome                  = 'Relaunched'
+            ShouldExitCurrentProcess = $true
+            Message                  = 'Nova instância do SpoolDoctor iniciada com privilégios de Administrador.'
+        }
+    }
+    catch {
+        if (Test-SpoolDoctorElevationCanceled -Exception $_.Exception) {
+            return [PSCustomObject]@{
+                PSTypeName               = 'SpoolDoctor.ElevationResult'
+                Outcome                  = 'Canceled'
+                ShouldExitCurrentProcess = $false
+                Message                  = "Elevação UAC recusada ou cancelada pelo usuário. Janela aberta em modo somente leitura. Use 'Reiniciar como Administrador' quando desejar alterar a fila."
+            }
+        }
+
+        return [PSCustomObject]@{
+            PSTypeName               = 'SpoolDoctor.ElevationResult'
+            Outcome                  = 'Failed'
+            ShouldExitCurrentProcess = $false
+            Message                  = "Não foi possível iniciar o SpoolDoctor como Administrador: $($_.Exception.Message) Janela mantida em modo somente leitura."
+        }
+    }
+}
+
 function Sync-SpoolDoctorSelectionState {
     [CmdletBinding()]
     param(
@@ -216,11 +405,12 @@ function Sync-SpoolDoctorSelectionState {
         return
     }
 
+    $isElevated = [bool]$ui.IsElevated
     $hasValidSelection = (
         $ui.Grid.SelectedRows.Count -gt 0 -and
         $null -ne $ui.Grid.SelectedRows[0].Tag
     )
-    $ui.CancelButton.Enabled = [bool]$hasValidSelection
+    $ui.CancelButton.Enabled = ($isElevated -and [bool]$hasValidSelection)
 }
 
 function Sync-SpoolDoctorBusyState {
@@ -235,21 +425,25 @@ function Sync-SpoolDoctorBusyState {
     )
 
     $ui = $Form.Tag
-    if ($null -eq $ui) {
+    if ($Form.IsDisposed -or $null -eq $ui) {
         return
     }
+
+    $isElevated = [bool]$ui.IsElevated
 
     if ($IsBusy) {
         $ui.RefreshButton.Enabled = $false
         $ui.DiagnoseButton.Enabled = $false
         $ui.CancelButton.Enabled = $false
         $ui.ResetButton.Enabled = $false
+        $ui.ElevateButton.Enabled = $false
         $Form.UseWaitCursor = $true
     }
     else {
         $ui.RefreshButton.Enabled = $true
         $ui.DiagnoseButton.Enabled = $true
-        $ui.ResetButton.Enabled = $true
+        $ui.ResetButton.Enabled = $isElevated
+        $ui.ElevateButton.Enabled = (-not $isElevated)
         Sync-SpoolDoctorSelectionState -Form $Form
         $Form.UseWaitCursor = $false
     }
@@ -554,13 +748,87 @@ function Invoke-SpoolDoctorDiagnose {
     }
 }
 
+function Show-SpoolDoctorFormDialog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [System.Windows.Forms.Form]$Form
+    )
+
+    $null = $Form.ShowDialog()
+}
+
+function Close-SpoolDoctorForm {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [System.Windows.Forms.Form]$Form
+    )
+
+    $Form.Close()
+}
+
+function Invoke-SpoolDoctorElevate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [System.Windows.Forms.Form]$Form
+    )
+
+    $ui = $Form.Tag
+    if ($null -eq $ui) {
+        return
+    }
+
+    if (Test-SpoolDoctorElevated) {
+        $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] O SpoolDoctor já está sendo executado como Administrador."
+        return
+    }
+
+    Sync-SpoolDoctorBusyState -Form $Form -IsBusy $true
+
+    try {
+        $elevateParams = @{
+            ScriptPath = $ui.ScriptPath
+            Force      = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$ui.LogPath)) {
+            $elevateParams['LogPath'] = $ui.LogPath
+        }
+
+        $result = Request-SpoolDoctorElevation @elevateParams
+        if ($result.ShouldExitCurrentProcess) {
+            Close-SpoolDoctorForm -Form $Form
+            return
+        }
+
+        $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] [AVISO] $($result.Message)"
+    }
+    finally {
+        Sync-SpoolDoctorBusyState -Form $Form -IsBusy $false
+    }
+}
+
 function Initialize-SpoolDoctorForm {
     [CmdletBinding()]
     [OutputType([System.Windows.Forms.Form])]
     param(
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string]$LogPath
+        [string]$LogPath,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$ScriptPath = $script:SpoolDoctorUIScriptPath,
+
+        [Parameter()]
+        [AllowEmptyString()]
+        [string]$StartupNotice = ''
     )
 
     $computerName = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
@@ -570,8 +838,11 @@ function Initialize-SpoolDoctorForm {
         [System.Environment]::MachineName
     }
 
+    $isElevated = [bool](Test-SpoolDoctorElevated)
+    $privilegeTitleSuffix = if ($isElevated) { 'Administrador' } else { 'Usuário padrão' }
+
     $form = New-Object -TypeName System.Windows.Forms.Form
-    $form.Text = 'SpoolDoctor - Fila de Impressão'
+    $form.Text = "SpoolDoctor - Fila de Impressão ($privilegeTitleSuffix)"
     $form.Size = New-Object -TypeName System.Drawing.Size(960, 560)
     $form.MinimumSize = New-Object -TypeName System.Drawing.Size(780, 480)
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -580,9 +851,11 @@ function Initialize-SpoolDoctorForm {
     $layout = New-Object -TypeName System.Windows.Forms.TableLayoutPanel
     $layout.Dock = [System.Windows.Forms.DockStyle]::Fill
     $layout.Padding = New-Object -TypeName System.Windows.Forms.Padding(10)
-    $layout.ColumnCount = 1
-    $layout.RowCount = 4
+    $layout.ColumnCount = 2
+    $layout.RowCount = 5
     $null = $layout.ColumnStyles.Add((New-Object -TypeName System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    $null = $layout.ColumnStyles.Add((New-Object -TypeName System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    $null = $layout.RowStyles.Add((New-Object -TypeName System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
     $null = $layout.RowStyles.Add((New-Object -TypeName System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
     $null = $layout.RowStyles.Add((New-Object -TypeName System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 65)))
     $null = $layout.RowStyles.Add((New-Object -TypeName System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
@@ -591,31 +864,69 @@ function Initialize-SpoolDoctorForm {
     $topPanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
     $topPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
     $topPanel.AutoSize = $true
+    $topPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
     $topPanel.WrapContents = $true
-    $topPanel.Padding = New-Object -TypeName System.Windows.Forms.Padding(0, 0, 0, 6)
+    $topPanel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0)
+    $topPanelBottomPadding = if ($isElevated) { 4 } else { 2 }
+    $topPanel.Padding = New-Object -TypeName System.Windows.Forms.Padding(0, 0, 0, $topPanelBottomPadding)
 
     $computerLabel = New-Object -TypeName System.Windows.Forms.Label
     $computerLabel.Text = "Máquina: $computerName"
     $computerLabel.AutoSize = $true
     $computerLabel.Font = New-Object -TypeName System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
-    $computerLabel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 16, 4)
+    $computerLabel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 16, 2)
 
     $filterLabel = New-Object -TypeName System.Windows.Forms.Label
     $filterLabel.Text = 'Impressora (opcional):'
     $filterLabel.AutoSize = $true
-    $filterLabel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 6, 4)
+    $filterLabel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 6, 2)
 
     $filterTextBox = New-Object -TypeName System.Windows.Forms.TextBox
     $filterTextBox.Width = 220
-    $filterTextBox.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 3, 10, 4)
+    $filterTextBox.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 3, 10, 2)
 
     $refreshButton = New-Object -TypeName System.Windows.Forms.Button
     $refreshButton.Text = 'Atualizar'
     $refreshButton.AutoSize = $true
     $refreshButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
-    $refreshButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 1, 0, 4)
+    $refreshButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 1, 0, 2)
 
     $topPanel.Controls.AddRange(@($computerLabel, $filterLabel, $filterTextBox, $refreshButton))
+
+    $privilegeLabel = New-Object -TypeName System.Windows.Forms.Label
+    $privilegeLabel.AutoSize = $true
+    $privilegeLabel.Font = New-Object -TypeName System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $privilegeLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+    $privilegeLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Right
+    $privilegeLabel.Margin = New-Object -TypeName System.Windows.Forms.Padding(12, 2, 0, 4)
+    if ($isElevated) {
+        $privilegeLabel.Text = 'Privilégio: Administrador'
+        $privilegeLabel.ForeColor = [System.Drawing.Color]::DarkGreen
+    }
+    else {
+        $privilegeLabel.Text = 'Privilégio: Usuário padrão (somente leitura)'
+        $privilegeLabel.ForeColor = [System.Drawing.Color]::DarkRed
+    }
+
+    $elevatePanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
+    $elevatePanel.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $elevatePanel.AutoSize = $true
+    $elevatePanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+    $elevatePanel.FlowDirection = [System.Windows.Forms.FlowDirection]::RightToLeft
+    $elevatePanel.WrapContents = $false
+    $elevatePanel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0)
+    $elevatePanel.Padding = New-Object -TypeName System.Windows.Forms.Padding(0, 0, 0, 6)
+    $elevatePanel.Visible = (-not $isElevated)
+
+    $elevateButton = New-Object -TypeName System.Windows.Forms.Button
+    $elevateButton.Text = 'Reiniciar como Administrador'
+    $elevateButton.AutoSize = $true
+    $elevateButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
+    $elevateButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 0, 0, 2)
+    $elevateButton.Visible = (-not $isElevated)
+    $elevateButton.Enabled = (-not $isElevated)
+
+    $elevatePanel.Controls.Add($elevateButton)
 
     $grid = New-Object -TypeName System.Windows.Forms.DataGridView
     $grid.Dock = [System.Windows.Forms.DockStyle]::Fill
@@ -646,7 +957,9 @@ function Initialize-SpoolDoctorForm {
     $actionPanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
     $actionPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
     $actionPanel.AutoSize = $true
+    $actionPanel.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
     $actionPanel.WrapContents = $true
+    $actionPanel.Margin = New-Object -TypeName System.Windows.Forms.Padding(0)
     $actionPanel.Padding = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 0, 6)
 
     $whatIfCheckBox = New-Object -TypeName System.Windows.Forms.CheckBox
@@ -676,6 +989,7 @@ function Initialize-SpoolDoctorForm {
     $resetButton = New-Object -TypeName System.Windows.Forms.Button
     $resetButton.Text = 'Resetar Spooler'
     $resetButton.AutoSize = $true
+    $resetButton.Enabled = $isElevated
     $resetButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
     $resetButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 0, 4)
 
@@ -696,17 +1010,31 @@ function Initialize-SpoolDoctorForm {
     $statusGroup.Controls.Add($statusTextBox)
 
     $layout.Controls.Add($topPanel, 0, 0)
-    $layout.Controls.Add($grid, 0, 1)
-    $layout.Controls.Add($actionPanel, 0, 2)
-    $layout.Controls.Add($statusGroup, 0, 3)
+    $layout.Controls.Add($privilegeLabel, 1, 0)
+    $layout.Controls.Add($elevatePanel, 0, 1)
+    $layout.SetColumnSpan($elevatePanel, 2)
+    $layout.Controls.Add($grid, 0, 2)
+    $layout.SetColumnSpan($grid, 2)
+    $layout.Controls.Add($actionPanel, 0, 3)
+    $layout.SetColumnSpan($actionPanel, 2)
+    $layout.Controls.Add($statusGroup, 0, 4)
+    $layout.SetColumnSpan($statusGroup, 2)
 
     $form.Controls.Add($layout)
 
     $resolvedLogPath = if ($PSBoundParameters.ContainsKey('LogPath')) { $LogPath } else { $null }
+    $resolvedScriptPath = if (-not [string]::IsNullOrWhiteSpace($ScriptPath)) { $ScriptPath } else { $script:SpoolDoctorUIScriptPath }
+    $resolvedStartupNotice = if (-not [string]::IsNullOrWhiteSpace($StartupNotice)) { $StartupNotice } else { '' }
+
     $form.Tag = @{
         ComputerName   = $computerName
         LogPath        = $resolvedLogPath
+        IsElevated     = $isElevated
+        ScriptPath     = $resolvedScriptPath
+        StartupNotice  = $resolvedStartupNotice
         ComputerLabel  = $computerLabel
+        PrivilegeLabel = $privilegeLabel
+        ElevateButton  = $elevateButton
         FilterTextBox  = $filterTextBox
         RefreshButton  = $refreshButton
         Grid           = $grid
@@ -718,10 +1046,21 @@ function Initialize-SpoolDoctorForm {
         StatusTextBox  = $statusTextBox
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($resolvedStartupNotice)) {
+        $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-SpoolDoctorStatusText -Form $form -Text "[$nowText] [AVISO] $resolvedStartupNotice"
+    }
+
     $refreshButton.Add_Click({
         $owner = $this.FindForm()
         if ($null -ne $owner) {
             Invoke-SpoolDoctorRefresh -Form $owner
+        }
+    })
+    $elevateButton.Add_Click({
+        $owner = $this.FindForm()
+        if ($null -ne $owner) {
+            Invoke-SpoolDoctorElevate -Form $owner
         }
     })
     $diagnoseButton.Add_Click({
@@ -757,8 +1096,36 @@ function Show-SpoolDoctorUI {
     param(
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string]$LogPath
+        [string]$LogPath,
+
+        [Parameter()]
+        [switch]$NoElevate,
+
+        [Parameter()]
+        [switch]$ElevationAttempted,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$ScriptPath = $script:SpoolDoctorUIScriptPath
     )
+
+    $elevationParams = @{
+        ScriptPath = $ScriptPath
+    }
+    if ($PSBoundParameters.ContainsKey('LogPath')) {
+        $elevationParams['LogPath'] = $LogPath
+    }
+    if ($NoElevate) {
+        $elevationParams['NoElevate'] = $true
+    }
+    if ($ElevationAttempted) {
+        $elevationParams['ElevationAttempted'] = $true
+    }
+
+    $elevationResult = Request-SpoolDoctorElevation @elevationParams
+    if ($elevationResult.ShouldExitCurrentProcess) {
+        return
+    }
 
     Import-SpoolDoctorModule -Force
     [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -767,13 +1134,20 @@ function Show-SpoolDoctorUI {
     if ($PSBoundParameters.ContainsKey('LogPath')) {
         $formParams['LogPath'] = $LogPath
     }
+    if (-not [string]::IsNullOrWhiteSpace($ScriptPath)) {
+        $formParams['ScriptPath'] = $ScriptPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$elevationResult.Message)) {
+        $formParams['StartupNotice'] = [string]$elevationResult.Message
+    }
 
     $form = Initialize-SpoolDoctorForm @formParams
     try {
         $form.Add_Shown({
-            Invoke-SpoolDoctorRefresh -Form $this
+            $hasStartupNotice = ($null -ne $this.Tag -and -not [string]::IsNullOrWhiteSpace([string]$this.Tag.StartupNotice))
+            Invoke-SpoolDoctorRefresh -Form $this -PreserveStatus:$hasStartupNotice
         })
-        $null = $form.ShowDialog()
+        Show-SpoolDoctorFormDialog -Form $form
     }
     finally {
         $form.Dispose()
@@ -783,9 +1157,17 @@ function Show-SpoolDoctorUI {
 Import-SpoolDoctorModule
 
 if (-not $NoShow -and $MyInvocation.InvocationName -ne '.') {
-    $showParams = @{}
+    $showParams = @{
+        ScriptPath = $script:SpoolDoctorUIScriptPath
+    }
     if ($PSBoundParameters.ContainsKey('LogPath')) {
         $showParams['LogPath'] = $LogPath
+    }
+    if ($NoElevate) {
+        $showParams['NoElevate'] = $true
+    }
+    if ($ElevationAttempted) {
+        $showParams['ElevationAttempted'] = $true
     }
     Show-SpoolDoctorUI @showParams
 }

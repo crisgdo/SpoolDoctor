@@ -11,6 +11,26 @@
         if (Test-Path -LiteralPath $script:uiScriptPath -PathType Leaf) {
             . $script:uiScriptPath -NoShow
         }
+
+        function Get-SpoolDoctorControlVisibleFlag {
+            param(
+                [Parameter(Mandatory)]
+                [System.Windows.Forms.Control]$Control
+            )
+
+            $parent = $Control.Parent
+            if ($null -eq $parent) {
+                return [bool]$Control.Visible
+            }
+
+            $parent.Controls.Remove($Control)
+            try {
+                return [bool]$Control.Visible
+            }
+            finally {
+                $parent.Controls.Add($Control)
+            }
+        }
     }
 
     AfterAll {
@@ -51,6 +71,18 @@
         }
         if (Get-Command -Name 'Confirm-SpoolDoctorAction' -ErrorAction SilentlyContinue) {
             Mock Confirm-SpoolDoctorAction { return $false }
+        }
+        if (Get-Command -Name 'Test-SpoolDoctorElevated' -ErrorAction SilentlyContinue) {
+            Mock Test-SpoolDoctorElevated { return $true }
+        }
+        if (Get-Command -Name 'Start-SpoolDoctorElevatedProcess' -ErrorAction SilentlyContinue) {
+            Mock Start-SpoolDoctorElevatedProcess {}
+        }
+        if (Get-Command -Name 'Show-SpoolDoctorFormDialog' -ErrorAction SilentlyContinue) {
+            Mock Show-SpoolDoctorFormDialog {}
+        }
+        if (Get-Command -Name 'Close-SpoolDoctorForm' -ErrorAction SilentlyContinue) {
+            Mock Close-SpoolDoctorForm {}
         }
         if (Get-Command -Name 'Test-Spooler' -ErrorAction SilentlyContinue) {
             Mock Test-Spooler {
@@ -174,6 +206,11 @@
             $ui | Should -Not -BeNullOrEmpty
 
             $ui.ComputerLabel.Text | Should -Match ([regex]::Escape($env:COMPUTERNAME))
+            $form.Text | Should -Match 'Administrador'
+            $ui.PrivilegeLabel | Should -BeOfType [System.Windows.Forms.Label]
+            $ui.PrivilegeLabel.Text | Should -Match 'Administrador'
+            $ui.ElevateButton | Should -BeOfType [System.Windows.Forms.Button]
+            (Get-SpoolDoctorControlVisibleFlag -Control $ui.ElevateButton) | Should -BeFalse
             $ui.FilterTextBox | Should -BeOfType [System.Windows.Forms.TextBox]
             $ui.RefreshButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.Grid | Should -BeOfType [System.Windows.Forms.DataGridView]
@@ -744,6 +781,393 @@
         }
         finally {
             $form.Dispose()
+        }
+    }
+
+    It 'declara parâmetros de elevação na UI e SupportsShouldProcess no wrapper de RunAs' {
+        $uiCommand = Get-Command -Name $script:uiScriptPath -ErrorAction Stop
+        $uiCommand.Parameters.Keys | Should -Contain 'NoShow'
+        $uiCommand.Parameters.Keys | Should -Contain 'NoElevate'
+        $uiCommand.Parameters.Keys | Should -Contain 'ElevationAttempted'
+        $uiCommand.Parameters.Keys | Should -Contain 'LogPath'
+
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:uiScriptPath, [ref]$tokens, [ref]$parseErrors)
+        $parseErrors.Count | Should -Be 0
+
+        $elevateFnAst = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Start-SpoolDoctorElevatedProcess'
+        }, $true)
+        $elevateFnAst | Should -Not -BeNullOrEmpty
+
+        $cmdletBindingAst = $elevateFnAst.Body.ParamBlock.Attributes |
+            Where-Object { $_.TypeName.Name -eq 'CmdletBinding' } |
+            Select-Object -First 1
+        $cmdletBindingAst | Should -Not -BeNullOrEmpty
+
+        $supportsArg = $cmdletBindingAst.NamedArguments |
+            Where-Object { $_.ArgumentName -eq 'SupportsShouldProcess' } |
+            Select-Object -First 1
+        $supportsArg | Should -Not -BeNullOrEmpty
+        ($supportsArg.ExpressionOmitted -or $supportsArg.Argument.ToString() -match 'true') | Should -BeTrue
+    }
+
+    It 'monta argumentos de elevação com caminho entre aspas, -STA, -ElevationAttempted e -LogPath opcional' {
+        $spaceScriptPath = 'D:\Pasta Com Espaços\ui\SpoolDoctorUI.ps1'
+        $argsWithoutLog = @(Get-SpoolDoctorElevationArgumentList -ScriptPath $spaceScriptPath)
+
+        $argsWithoutLog | Should -Contain '-NoProfile'
+        $argsWithoutLog | Should -Contain '-ExecutionPolicy'
+        $argsWithoutLog | Should -Contain 'Bypass'
+        $argsWithoutLog | Should -Contain '-STA'
+        $argsWithoutLog | Should -Contain '-WindowStyle'
+        $argsWithoutLog | Should -Contain 'Hidden'
+        $argsWithoutLog | Should -Contain '-File'
+        $argsWithoutLog | Should -Contain ('"{0}"' -f $spaceScriptPath)
+        $argsWithoutLog | Should -Contain '-ElevationAttempted'
+        $argsWithoutLog | Should -Not -Contain '-LogPath'
+
+        $staIndex = [Array]::IndexOf($argsWithoutLog, '-STA')
+        $fileIndex = [Array]::IndexOf($argsWithoutLog, '-File')
+        $attemptIndex = [Array]::IndexOf($argsWithoutLog, '-ElevationAttempted')
+        $staIndex | Should -BeLessThan $fileIndex
+        $argsWithoutLog[$fileIndex + 1] | Should -Be ('"{0}"' -f $spaceScriptPath)
+        $attemptIndex | Should -BeGreaterThan $fileIndex
+
+        $spaceLogPath = 'C:\Logs Com Espaço\spooldoctor.log'
+        $argsWithLog = @(Get-SpoolDoctorElevationArgumentList -ScriptPath $spaceScriptPath -LogPath $spaceLogPath)
+
+        $logFlagIndex = [Array]::IndexOf($argsWithLog, '-LogPath')
+        $logFlagIndex | Should -BeGreaterThan $fileIndex
+        $argsWithLog[$logFlagIndex + 1] | Should -Be ('"{0}"' -f $spaceLogPath)
+    }
+
+    It 'não tenta relançar quando sessão já está elevada como Administrador' {
+        $script:capturedElevatedUiState = $null
+
+        Mock Import-SpoolDoctorModule {}
+        Mock Show-SpoolDoctorFormDialog {
+            param([System.Windows.Forms.Form]$Form)
+            $script:capturedElevatedUiState = [PSCustomObject]@{
+                Title          = $Form.Text
+                PrivilegeText  = $Form.Tag.PrivilegeLabel.Text
+                ElevateVisible = Get-SpoolDoctorControlVisibleFlag -Control $Form.Tag.ElevateButton
+                ResetEnabled   = $Form.Tag.ResetButton.Enabled
+            }
+        }
+
+        $elevationResult = Request-SpoolDoctorElevation -ScriptPath $script:uiScriptPath
+        $elevationResult.Outcome | Should -Be 'AlreadyElevated'
+        $elevationResult.ShouldExitCurrentProcess | Should -BeFalse
+
+        Show-SpoolDoctorUI -ScriptPath $script:uiScriptPath -LogPath $script:logPath
+
+        Should -Invoke Start-SpoolDoctorElevatedProcess -Times 0 -Exactly
+        Should -Invoke Show-SpoolDoctorFormDialog -Times 1 -Exactly
+        $script:capturedElevatedUiState | Should -Not -BeNullOrEmpty
+        $script:capturedElevatedUiState.Title | Should -Match 'Administrador'
+        $script:capturedElevatedUiState.PrivilegeText | Should -Match 'Administrador'
+        $script:capturedElevatedUiState.ElevateVisible | Should -BeFalse
+        $script:capturedElevatedUiState.ResetEnabled | Should -BeTrue
+    }
+
+    It 'dispara elevação UAC na inicialização quando não é Administrador e encerra instância atual sem abrir janela duplicada' {
+        $script:capturedLaunchArgs = $null
+
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Import-SpoolDoctorModule {}
+        Mock Initialize-SpoolDoctorForm { throw 'Não deveria criar a janela quando o relançamento UAC ocorre.' }
+        Mock Start-SpoolDoctorElevatedProcess {
+            param([string[]]$ArgumentList)
+            $script:capturedLaunchArgs = @($ArgumentList)
+        }
+
+        { Show-SpoolDoctorUI -ScriptPath $script:uiScriptPath -LogPath $script:logPath } | Should -Not -Throw
+
+        Should -Invoke Start-SpoolDoctorElevatedProcess -Times 1 -Exactly
+        Should -Invoke Initialize-SpoolDoctorForm -Times 0 -Exactly
+        Should -Invoke Show-SpoolDoctorFormDialog -Times 0 -Exactly
+
+        $script:capturedLaunchArgs | Should -Not -BeNullOrEmpty
+        $script:capturedLaunchArgs | Should -Contain '-NoProfile'
+        $script:capturedLaunchArgs | Should -Contain '-ExecutionPolicy'
+        $script:capturedLaunchArgs | Should -Contain 'Bypass'
+        $script:capturedLaunchArgs | Should -Contain '-STA'
+        $script:capturedLaunchArgs | Should -Contain '-WindowStyle'
+        $script:capturedLaunchArgs | Should -Contain 'Hidden'
+        $script:capturedLaunchArgs | Should -Contain '-File'
+        $script:capturedLaunchArgs | Should -Contain ('"{0}"' -f $script:uiScriptPath)
+        $script:capturedLaunchArgs | Should -Contain '-ElevationAttempted'
+        $script:capturedLaunchArgs | Should -Contain '-LogPath'
+        $script:capturedLaunchArgs | Should -Contain ('"{0}"' -f $script:logPath)
+
+        $staIdx = [Array]::IndexOf($script:capturedLaunchArgs, '-STA')
+        $fileIdx = [Array]::IndexOf($script:capturedLaunchArgs, '-File')
+        $attemptIdx = [Array]::IndexOf($script:capturedLaunchArgs, '-ElevationAttempted')
+        $logIdx = [Array]::IndexOf($script:capturedLaunchArgs, '-LogPath')
+        $staIdx | Should -BeLessThan $fileIdx
+        $script:capturedLaunchArgs[$fileIdx + 1] | Should -Be ('"{0}"' -f $script:uiScriptPath)
+        $attemptIdx | Should -BeGreaterThan $fileIdx
+        $script:capturedLaunchArgs[$logIdx + 1] | Should -Be ('"{0}"' -f $script:logPath)
+    }
+
+    It 'trata cancelamento do UAC (Win32Exception 1223 direto, cadeia InnerException e OperationCanceledException) e abre em modo somente leitura' {
+        $script:uacAttemptCounter = 0
+        $script:cancelScenario = 'DirectWin32'
+        $script:capturedCanceledUiState = $null
+
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Import-SpoolDoctorModule {}
+        Mock Start-SpoolDoctorElevatedProcess {
+            $script:uacAttemptCounter++
+            switch ($script:cancelScenario) {
+                'DirectWin32' {
+                    throw (New-Object -TypeName System.ComponentModel.Win32Exception -ArgumentList 1223)
+                }
+                'NestedInnerWin32' {
+                    $rootWin32 = New-Object -TypeName System.ComponentModel.Win32Exception -ArgumentList 1223
+                    $midEx = New-Object -TypeName System.Exception -ArgumentList @('Camada intermediária', $rootWin32)
+                    throw (New-Object -TypeName System.InvalidOperationException -ArgumentList @('Falha externa ao iniciar processo', $midEx))
+                }
+                'OperationCanceled' {
+                    throw (New-Object -TypeName System.OperationCanceledException -ArgumentList 'Elevação cancelada.')
+                }
+            }
+        }
+        Mock Show-SpoolDoctorFormDialog {
+            param([System.Windows.Forms.Form]$Form)
+            $script:capturedCanceledUiState = [PSCustomObject]@{
+                Title           = $Form.Text
+                PrivilegeText   = $Form.Tag.PrivilegeLabel.Text
+                ElevateVisible  = Get-SpoolDoctorControlVisibleFlag -Control $Form.Tag.ElevateButton
+                ElevateEnabled  = $Form.Tag.ElevateButton.Enabled
+                RefreshEnabled  = $Form.Tag.RefreshButton.Enabled
+                DiagnoseEnabled = $Form.Tag.DiagnoseButton.Enabled
+                ResetEnabled    = $Form.Tag.ResetButton.Enabled
+                CancelEnabled   = $Form.Tag.CancelButton.Enabled
+                StatusText      = $Form.Tag.StatusTextBox.Text
+            }
+        }
+
+        foreach ($scenario in @('DirectWin32', 'NestedInnerWin32', 'OperationCanceled')) {
+            $script:cancelScenario = $scenario
+            $script:uacAttemptCounter = 0
+
+            $res = Request-SpoolDoctorElevation -ScriptPath $script:uiScriptPath
+            $script:uacAttemptCounter | Should -Be 1
+            $res.Outcome | Should -Be 'Canceled'
+            $res.ShouldExitCurrentProcess | Should -BeFalse
+            $res.Message | Should -Match 'cancelad|recusad'
+            $res.Message | Should -Match 'somente leitura'
+        }
+
+        $script:cancelScenario = 'NestedInnerWin32'
+        $script:uacAttemptCounter = 0
+
+        { Show-SpoolDoctorUI -ScriptPath $script:uiScriptPath -LogPath $script:logPath } | Should -Not -Throw
+
+        $script:uacAttemptCounter | Should -Be 1
+        Should -Invoke Start-SpoolDoctorElevatedProcess -Times 4 -Exactly
+        Should -Invoke Show-SpoolDoctorFormDialog -Times 1 -Exactly
+
+        $script:capturedCanceledUiState | Should -Not -BeNullOrEmpty
+        $script:capturedCanceledUiState.Title | Should -Match 'Usuário padrão'
+        $script:capturedCanceledUiState.PrivilegeText | Should -Match 'Usuário padrão'
+        $script:capturedCanceledUiState.ElevateVisible | Should -BeTrue
+        $script:capturedCanceledUiState.ElevateEnabled | Should -BeTrue
+        $script:capturedCanceledUiState.RefreshEnabled | Should -BeTrue
+        $script:capturedCanceledUiState.DiagnoseEnabled | Should -BeTrue
+        $script:capturedCanceledUiState.ResetEnabled | Should -BeFalse
+        $script:capturedCanceledUiState.CancelEnabled | Should -BeFalse
+        $script:capturedCanceledUiState.StatusText | Should -Match 'cancelad|recusad'
+    }
+
+    It 'trata falha inesperada ao relançar sem entrar em loop e abre em modo somente leitura com detalhe do erro' {
+        $script:capturedFailedUiState = $null
+
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Import-SpoolDoctorModule {}
+        Mock Start-SpoolDoctorElevatedProcess {
+            throw (New-Object -TypeName System.ComponentModel.Win32Exception -ArgumentList 5)
+        }
+        Mock Show-SpoolDoctorFormDialog {
+            param([System.Windows.Forms.Form]$Form)
+            $script:capturedFailedUiState = [PSCustomObject]@{
+                ResetEnabled   = $Form.Tag.ResetButton.Enabled
+                ElevateVisible = Get-SpoolDoctorControlVisibleFlag -Control $Form.Tag.ElevateButton
+                StatusText     = $Form.Tag.StatusTextBox.Text
+            }
+        }
+
+        $res = Request-SpoolDoctorElevation -ScriptPath $script:uiScriptPath
+        $res.Outcome | Should -Be 'Failed'
+        $res.ShouldExitCurrentProcess | Should -BeFalse
+
+        { Show-SpoolDoctorUI -ScriptPath $script:uiScriptPath -LogPath $script:logPath } | Should -Not -Throw
+
+        Should -Invoke Start-SpoolDoctorElevatedProcess -Times 2 -Exactly
+        Should -Invoke Show-SpoolDoctorFormDialog -Times 1 -Exactly
+        $script:capturedFailedUiState.ResetEnabled | Should -BeFalse
+        $script:capturedFailedUiState.ElevateVisible | Should -BeTrue
+        $script:capturedFailedUiState.StatusText | Should -Match 'Falha|Não foi possível'
+    }
+
+    It 'respeita trava anti-loop (-ElevationAttempted) e -NoElevate sem tentar relançar' {
+        $script:capturedAntiLoopUiState = $null
+
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Import-SpoolDoctorModule {}
+        Mock Show-SpoolDoctorFormDialog {
+            param([System.Windows.Forms.Form]$Form)
+            $script:capturedAntiLoopUiState = [PSCustomObject]@{
+                Title          = $Form.Text
+                ResetEnabled   = $Form.Tag.ResetButton.Enabled
+                ElevateVisible = Get-SpoolDoctorControlVisibleFlag -Control $Form.Tag.ElevateButton
+                StatusText     = $Form.Tag.StatusTextBox.Text
+            }
+        }
+
+        $antiLoopResult = Request-SpoolDoctorElevation -ScriptPath $script:uiScriptPath -ElevationAttempted
+        $antiLoopResult.Outcome | Should -Be 'Skipped'
+        $antiLoopResult.ShouldExitCurrentProcess | Should -BeFalse
+
+        $noElevateResult = Request-SpoolDoctorElevation -ScriptPath $script:uiScriptPath -NoElevate
+        $noElevateResult.Outcome | Should -Be 'Skipped'
+        $noElevateResult.ShouldExitCurrentProcess | Should -BeFalse
+
+        { Show-SpoolDoctorUI -ScriptPath $script:uiScriptPath -ElevationAttempted -LogPath $script:logPath } | Should -Not -Throw
+        $script:capturedAntiLoopUiState.Title | Should -Match 'Usuário padrão'
+        $script:capturedAntiLoopUiState.ResetEnabled | Should -BeFalse
+        $script:capturedAntiLoopUiState.ElevateVisible | Should -BeTrue
+        $script:capturedAntiLoopUiState.StatusText | Should -Match 'elevação|Administrador|somente leitura'
+
+        { Show-SpoolDoctorUI -ScriptPath $script:uiScriptPath -NoElevate -LogPath $script:logPath } | Should -Not -Throw
+
+        Should -Invoke Start-SpoolDoctorElevatedProcess -Times 0 -Exactly
+        Should -Invoke Show-SpoolDoctorFormDialog -Times 2 -Exactly
+    }
+
+    It 'executa com -NoShow em processo filho sem tentar elevar nem abrir janela' {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $script:uiScriptPath -NoShow
+        $LASTEXITCODE | Should -Be 0
+    }
+
+    It 'mantém Cancelar e Resetar desabilitados em modo somente leitura mesmo após atualizar grade, selecionar job e diagnosticar' {
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Get-SpoolerJob {
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.PrintJob'
+                    Id           = 77
+                    PrinterName  = 'HP LaserJet'
+                    Document     = 'NotaFiscal.pdf'
+                    SizeBytes    = 4096L
+                    SubmittedAt  = [datetime]'2026-11-22T18:00:00'
+                    Age          = [timespan]::FromMinutes(5)
+                    Status       = 'Printing'
+                    ComputerName = $env:COMPUTERNAME
+                }
+            )
+        }
+
+        $form = Initialize-SpoolDoctorForm -ScriptPath $script:uiScriptPath -LogPath $script:logPath -StartupNotice 'Sessão em modo somente leitura.'
+        try {
+            $ui = $form.Tag
+            $form.Text | Should -Match 'Usuário padrão'
+            $ui.PrivilegeLabel.Text | Should -Match 'Usuário padrão'
+            (Get-SpoolDoctorControlVisibleFlag -Control $ui.ElevateButton) | Should -BeTrue
+            $ui.ElevateButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeFalse
+            $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.StatusTextBox.Text | Should -Match 'Sessão em modo somente leitura\.'
+
+            Invoke-SpoolDoctorRefresh -Form $form -PreserveStatus:(-not [string]::IsNullOrWhiteSpace([string]$ui.StartupNotice))
+            $ui.StatusTextBox.Text | Should -Match 'Sessão em modo somente leitura\.'
+            $ui.Grid.Rows.Count | Should -Be 1
+
+            $ui.Grid.Rows[0].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+
+            $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.ResetButton.Enabled | Should -BeFalse
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.DiagnoseButton.Enabled | Should -BeTrue
+            $ui.ElevateButton.Enabled | Should -BeTrue
+
+            Invoke-SpoolDoctorDiagnose -Form $form
+            Should -Invoke Test-Spooler -Times 1 -Exactly
+            $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.ResetButton.Enabled | Should -BeFalse
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.DiagnoseButton.Enabled | Should -BeTrue
+            $ui.ElevateButton.Enabled | Should -BeTrue
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'permite elevação manual via Invoke-SpoolDoctorElevate quando aceita e trata recusa ou sessão já elevada' {
+        $script:manualElevateArgs = $null
+
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Start-SpoolDoctorElevatedProcess {
+            param([string[]]$ArgumentList)
+            $script:manualElevateArgs = @($ArgumentList)
+        }
+
+        $form = Initialize-SpoolDoctorForm -ScriptPath $script:uiScriptPath -LogPath $script:logPath
+        try {
+            Invoke-SpoolDoctorElevate -Form $form
+
+            Should -Invoke Start-SpoolDoctorElevatedProcess -Times 1 -Exactly
+            Should -Invoke Close-SpoolDoctorForm -Times 1 -Exactly
+            $script:manualElevateArgs | Should -Contain '-ElevationAttempted'
+            $script:manualElevateArgs | Should -Contain '-LogPath'
+            $script:manualElevateArgs | Should -Contain ('"{0}"' -f $script:logPath)
+        }
+        finally {
+            $form.Dispose()
+        }
+
+        Mock Start-SpoolDoctorElevatedProcess {
+            $innerWin32 = New-Object -TypeName System.ComponentModel.Win32Exception -ArgumentList 1223
+            throw (New-Object -TypeName System.Exception -ArgumentList @('Recusado pelo UAC', $innerWin32))
+        }
+
+        $formCanceled = Initialize-SpoolDoctorForm -ScriptPath $script:uiScriptPath -LogPath $script:logPath
+        try {
+            $uiCanceled = $formCanceled.Tag
+            { Invoke-SpoolDoctorElevate -Form $formCanceled } | Should -Not -Throw
+
+            Should -Invoke Close-SpoolDoctorForm -Times 1 -Exactly
+            $uiCanceled.StatusTextBox.Text | Should -Match 'cancelad|recusad'
+            $uiCanceled.RefreshButton.Enabled | Should -BeTrue
+            $uiCanceled.DiagnoseButton.Enabled | Should -BeTrue
+            $uiCanceled.ElevateButton.Enabled | Should -BeTrue
+            $uiCanceled.CancelButton.Enabled | Should -BeFalse
+            $uiCanceled.ResetButton.Enabled | Should -BeFalse
+            $formCanceled.UseWaitCursor | Should -BeFalse
+        }
+        finally {
+            $formCanceled.Dispose()
+        }
+
+        Mock Test-SpoolDoctorElevated { return $true }
+        $formAlreadyAdmin = Initialize-SpoolDoctorForm -ScriptPath $script:uiScriptPath -LogPath $script:logPath
+        try {
+            $uiAdmin = $formAlreadyAdmin.Tag
+            Invoke-SpoolDoctorElevate -Form $formAlreadyAdmin
+
+            Should -Invoke Close-SpoolDoctorForm -Times 1 -Exactly
+            Should -Invoke Start-SpoolDoctorElevatedProcess -Times 2 -Exactly
+            $uiAdmin.StatusTextBox.Text | Should -Match 'Administrador'
+        }
+        finally {
+            $formAlreadyAdmin.Dispose()
         }
     }
 }
