@@ -12,16 +12,35 @@
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string]$LogPath
+        [string]$LogPath,
+
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ComputerName,
+
+        [Parameter()]
+        [PSCredential]$Credential,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$AllowedComputersPath
     )
 
     begin {
-        $computerName = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
-            $env:COMPUTERNAME
+        $hasCredential = ($PSBoundParameters.ContainsKey('Credential') -and $null -ne $Credential)
+        $targetParams = @{
+            HasCredential = $hasCredential
         }
-        else {
-            [System.Environment]::MachineName
+        if ($PSBoundParameters.ContainsKey('ComputerName')) {
+            $targetParams['ComputerName'] = $ComputerName
         }
+        if ($PSBoundParameters.ContainsKey('AllowedComputersPath')) {
+            $targetParams['AllowedComputersPath'] = $AllowedComputersPath
+        }
+
+        $resolvedTarget = Resolve-SpoolerTarget @targetParams
+        $computerName = [string]$resolvedTarget.ComputerName
 
         $actionName = 'Remove-SpoolerJob'
         $hasLogPath = $PSBoundParameters.ContainsKey('LogPath')
@@ -32,7 +51,73 @@
         $outcome = 'Failed'
         $message = ''
 
-        if (-not (Test-IsAdministrator)) {
+        if (-not $resolvedTarget.IsValid) {
+            $outcome = [string]$resolvedTarget.FailureOutcome
+            $message = [string]$resolvedTarget.ErrorMessage
+        }
+        elseif (-not $resolvedTarget.IsLocal) {
+            if ([string]::IsNullOrWhiteSpace($PrinterName)) {
+                $outcome = 'Failed'
+                $message = "Parâmetro -PrinterName inválido na máquina '$computerName' para o job ${Id}: o nome da impressora não pode conter apenas espaços em branco."
+            }
+            else {
+                $targetDescription = "$computerName - $PrinterName (Job $Id)"
+                $actionDescription = "Cancelar o job de impressão $Id na impressora '$PrinterName' na máquina remota '$computerName'"
+
+                if (-not $PSCmdlet.ShouldProcess($targetDescription, $actionDescription)) {
+                    if ($WhatIfPreference) {
+                        $outcome = 'Simulated'
+                        $message = "Simulação (-WhatIf): cancelamento do job $Id da impressora '$PrinterName' simulado na máquina remota '$computerName'; nenhuma alteração foi realizada."
+                    }
+                    else {
+                        $outcome = 'Skipped'
+                        $message = "Operação cancelada pelo usuário na confirmação para o job $Id da impressora '$PrinterName' na máquina '$computerName'."
+                    }
+                }
+                else {
+                    $remoteParams = @{
+                        ComputerName = $computerName
+                        Operation    = $actionName
+                        Parameters   = @{
+                            PrinterName = $PrinterName
+                            Id          = $Id
+                        }
+                    }
+                    if ($hasCredential) {
+                        $remoteParams['Credential'] = $Credential
+                    }
+
+                    $remoteResult = Invoke-SpoolerRemoteOperation @remoteParams
+                    if (-not $remoteResult.Success) {
+                        $outcome = [string]$remoteResult.Outcome
+                        $message = [string]$remoteResult.Message
+                    }
+                    elseif ($null -eq $remoteResult.Data) {
+                        $outcome = 'Failed'
+                        $message = "Resposta inválida ou vazia ao cancelar o job $Id da impressora '$PrinterName' na máquina '$computerName'."
+                    }
+                    else {
+                        $remoteData = $remoteResult.Data
+                        $outcomeProp = $remoteData.PSObject.Properties['Outcome']
+                        $messageProp = $remoteData.PSObject.Properties['Message']
+
+                        $outcome = if ($null -ne $outcomeProp -and -not [string]::IsNullOrWhiteSpace([string]$outcomeProp.Value)) {
+                            [string]$outcomeProp.Value
+                        }
+                        else {
+                            'Failed'
+                        }
+                        $message = if ($null -ne $messageProp -and -not [string]::IsNullOrWhiteSpace([string]$messageProp.Value)) {
+                            [string]$messageProp.Value
+                        }
+                        else {
+                            "Resultado remoto recebido sem mensagem detalhada para o job $Id na máquina '$computerName'."
+                        }
+                    }
+                }
+            }
+        }
+        elseif (-not (Test-IsAdministrator)) {
             $outcome = 'Failed'
             $message = "Permissão negada na máquina '$computerName' para cancelar o job $Id da impressora '$PrinterName': execute o PowerShell como Administrador."
         }

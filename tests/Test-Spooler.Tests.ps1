@@ -260,4 +260,150 @@
         $jobFailLogs[0] | Should -Match 'Outcome=Failed'
         $jobFailLogs[0] | Should -Match 'Erro ao ler fila da impressora\.'
     }
+
+    Context 'Execução remota (Operação 6)' {
+        BeforeEach {
+            $script:remoteAllowListPath = Join-Path -Path 'TestDrive:\' -ChildPath ("test-spooler-allow-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            @(
+                'PC-REMOTO-01'
+                'SRV-PRINT-01|PrintServer'
+            ) | Set-Content -LiteralPath $script:remoteAllowListPath -Encoding UTF8
+
+            $script:remoteSessionObj = [PSCustomObject]@{ ComputerName = 'PC-REMOTO-01'; Id = 4 }
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor { return $script:remoteSessionObj }
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                return [PSCustomObject]@{
+                    PSTypeName          = 'Deserialized.SpoolDoctor.Diagnostic'
+                    ComputerName        = 'PC-REMOTO-01'
+                    ServiceStatus       = 'Running'
+                    PrinterCount        = 1
+                    UnhealthyPrinters   = @()
+                    JobCount            = 0
+                    StuckJobs           = @()
+                    SpoolFileCount      = 0
+                    HasOrphanSpoolFiles = $false
+                    Health              = 'Healthy'
+                    IsHealthy           = $true
+                    Issues              = @()
+                    Recommendation      = 'Spooler saudável. Nenhuma ação corretiva necessária.'
+                    Timestamp           = Get-Date
+                }
+            }
+            Mock Remove-SpoolerRemoteSession -ModuleName SpoolDoctor {}
+        }
+
+        It 'preserva execução local quando -ComputerName aponta para a máquina local' {
+            $diag = Test-Spooler -ComputerName $env:COMPUTERNAME -AllowedComputersPath $script:remoteAllowListPath -LogPath $script:logPath
+
+            $diag.ComputerName | Should -Be $env:COMPUTERNAME
+            $diag.Health | Should -Be 'Healthy'
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 0 -Exactly
+            Should -Invoke Get-SpoolerServiceStatus -ModuleName SpoolDoctor -Times 1 -Exactly
+        }
+
+        It 'executa diagnóstico remoto reconstruindo SpoolDoctor.Diagnostic com hostname e grava log' {
+            $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList @(
+                'DOMINIO\operador',
+                (New-Object -TypeName System.Security.SecureString)
+            )
+
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                return [PSCustomObject]@{
+                    PSTypeName          = 'Deserialized.SpoolDoctor.Diagnostic'
+                    ComputerName        = 'PC-REMOTO-01'
+                    ServiceStatus       = 'Running'
+                    PrinterCount        = 2
+                    UnhealthyPrinters   = @([PSCustomObject]@{ Name = 'HP Remota'; Status = 'Offline' })
+                    JobCount            = 1
+                    StuckJobs           = @([PSCustomObject]@{ Id = 77; PrinterName = 'HP Remota'; Document = 'Doc.pdf'; Status = 'Error'; Age = [timespan]::FromMinutes(20); Reason = 'Status=Error' })
+                    SpoolFileCount      = $null
+                    HasOrphanSpoolFiles = $false
+                    Health              = 'Warning'
+                    IsHealthy           = $false
+                    Issues              = @("Impressora 'HP Remota' com status de alerta ('Offline').")
+                    Recommendation      = 'Tente cancelar com Remove-SpoolerJob.'
+                    Timestamp           = Get-Date
+                }
+            }
+
+            $diag = Test-Spooler -ComputerName 'pc-remoto-01' -StuckThresholdMinutes 20 -Credential $cred -AllowedComputersPath $script:remoteAllowListPath -LogPath $script:logPath
+
+            $diag.PSObject.TypeNames | Should -Contain 'SpoolDoctor.Diagnostic'
+            $diag.ComputerName | Should -Be 'PC-REMOTO-01'
+            $diag.Health | Should -Be 'Warning'
+            $diag.UnhealthyPrinters.Count | Should -Be 1
+            $diag.StuckJobs.Count | Should -Be 1
+            ($null -eq $diag.SpoolFileCount) | Should -BeTrue
+            $diag.Issues.Count | Should -Be 1
+
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly -ParameterFilter {
+                $ComputerName -eq 'PC-REMOTO-01' -and $null -ne $Credential
+            }
+            Should -Invoke Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor -Times 1 -Exactly
+            Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 1
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01'
+            $logLines[0] | Should -Match 'Action=Test-Spooler'
+            $logLines[0] | Should -Match 'Outcome=OK'
+            $logLines[0] | Should -Match 'Warning'
+        }
+
+        It 'recusa -ComputerName inválido ou fora da allow-list com log Failed e sem abrir sessão' {
+            { Test-Spooler -ComputerName 'PC;bad' -AllowedComputersPath $script:remoteAllowListPath -LogPath $script:logPath } | Should -Throw
+
+            $unlistedLog = Join-Path -Path 'TestDrive:\' -ChildPath ("test-unlisted-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            { Test-Spooler -ComputerName 'PC-INTRUSO' -AllowedComputersPath $script:remoteAllowListPath -LogPath $unlistedLog } | Should -Throw '*allow-list*'
+
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 0 -Exactly
+
+            $logLines = @(Get-Content -LiteralPath $unlistedLog -Encoding UTF8)
+            $logLines.Count | Should -Be 1
+            $logLines[0] | Should -Match 'Computer=PC-INTRUSO'
+            $logLines[0] | Should -Match 'Outcome=Failed'
+        }
+
+        It 'recusa -Credential sem alvo remoto com log Failed e sem abrir sessão' {
+            $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList @(
+                'DOMINIO\operador',
+                (New-Object -TypeName System.Security.SecureString)
+            )
+
+            { Test-Spooler -Credential $cred -LogPath $script:logPath } | Should -Throw '*Credential*'
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 0 -Exactly
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 1
+            $logLines[0] | Should -Match 'Outcome=Failed'
+        }
+
+        It 'registra Unreachable, fecha sessão no finally e propaga erro em falha de conectividade WinRM' {
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                throw (New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'WinRM unreachable.')
+            }
+
+            { Test-Spooler -ComputerName 'PC-REMOTO-01' -AllowedComputersPath $script:remoteAllowListPath -LogPath $script:logPath } | Should -Throw '*PC-REMOTO-01*'
+
+            Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 1
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01'
+            $logLines[0] | Should -Match 'Outcome=Unreachable'
+        }
+
+        It 'registra Failed e propaga erro em falha de autenticação WinRM' {
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                throw (New-Object -TypeName System.UnauthorizedAccessException -ArgumentList 'Access denied.')
+            }
+
+            { Test-Spooler -ComputerName 'PC-REMOTO-01' -AllowedComputersPath $script:remoteAllowListPath -LogPath $script:logPath } | Should -Throw '*PC-REMOTO-01*'
+
+            Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 0 -Exactly
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 1
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01'
+            $logLines[0] | Should -Match 'Outcome=Failed'
+        }
+    }
 }

@@ -8,18 +8,38 @@
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string]$LogPath
-    )
+        [string]$LogPath,
 
-    $computerName = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
-        $env:COMPUTERNAME
-    }
-    else {
-        [System.Environment]::MachineName
-    }
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ComputerName,
+
+        [Parameter()]
+        [PSCredential]$Credential,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$AllowedComputersPath
+    )
 
     $actionName = 'Test-Spooler'
     $now = Get-Date
+    $hasCredential = ($PSBoundParameters.ContainsKey('Credential') -and $null -ne $Credential)
+
+    $targetParams = @{
+        HasCredential = $hasCredential
+    }
+    if ($PSBoundParameters.ContainsKey('ComputerName')) {
+        $targetParams['ComputerName'] = $ComputerName
+    }
+    if ($PSBoundParameters.ContainsKey('AllowedComputersPath')) {
+        $targetParams['AllowedComputersPath'] = $AllowedComputersPath
+    }
+
+    $target = Resolve-SpoolerTarget @targetParams
+    $computerName = [string]$target.ComputerName
+
     $outcome = 'OK'
     $failureMessage = $null
     $diagnostic = $null
@@ -65,7 +85,79 @@
         )
     }
 
-    try {
+    if (-not $target.IsValid) {
+        $outcome = [string]$target.FailureOutcome
+        $failureMessage = [string]$target.ErrorMessage
+        $logMessage = $failureMessage
+    }
+    elseif (-not $target.IsLocal) {
+        try {
+            $remoteParams = @{
+                ComputerName = $computerName
+                Operation    = $actionName
+                Parameters   = @{
+                    StuckThresholdMinutes = $StuckThresholdMinutes
+                }
+            }
+            if ($hasCredential) {
+                $remoteParams['Credential'] = $Credential
+            }
+
+            $remoteResult = Invoke-SpoolerRemoteOperation @remoteParams
+            if (-not $remoteResult.Success) {
+                $outcome = [string]$remoteResult.Outcome
+                $failureMessage = [string]$remoteResult.Message
+                $logMessage = $failureMessage
+            }
+            elseif ($null -eq $remoteResult.Data) {
+                throw "Resposta inválida ou vazia ao diagnosticar o spooler na máquina '$computerName'."
+            }
+            else {
+                $rawDiag = $remoteResult.Data
+                $serviceStatus = [string]$rawDiag.PSObject.Properties['ServiceStatus'].Value
+                $printerCount = [int]$rawDiag.PSObject.Properties['PrinterCount'].Value
+                $unhealthyPrinters = @($rawDiag.PSObject.Properties['UnhealthyPrinters'].Value | Where-Object { $null -ne $_ })
+                $jobCount = [int]$rawDiag.PSObject.Properties['JobCount'].Value
+                $stuckJobs = @($rawDiag.PSObject.Properties['StuckJobs'].Value | Where-Object { $null -ne $_ })
+                $spoolFileProp = $rawDiag.PSObject.Properties['SpoolFileCount']
+                $spoolFileCount = if ($null -ne $spoolFileProp -and $null -ne $spoolFileProp.Value) { [int]$spoolFileProp.Value } else { $null }
+                $hasOrphan = [bool]$rawDiag.PSObject.Properties['HasOrphanSpoolFiles'].Value
+                $health = [string]$rawDiag.PSObject.Properties['Health'].Value
+                $isHealthy = [bool]$rawDiag.PSObject.Properties['IsHealthy'].Value
+                $issues = @($rawDiag.PSObject.Properties['Issues'].Value | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+                $recommendation = [string]$rawDiag.PSObject.Properties['Recommendation'].Value
+                $tsProp = $rawDiag.PSObject.Properties['Timestamp']
+                $diagTimestamp = if ($null -ne $tsProp -and $tsProp.Value -is [datetime]) { [datetime]$tsProp.Value } else { $now }
+
+                $diagnostic = [PSCustomObject]@{
+                    PSTypeName          = 'SpoolDoctor.Diagnostic'
+                    ComputerName        = $computerName
+                    ServiceStatus       = $serviceStatus
+                    PrinterCount        = $printerCount
+                    UnhealthyPrinters   = @($unhealthyPrinters)
+                    JobCount            = $jobCount
+                    StuckJobs           = @($stuckJobs)
+                    SpoolFileCount      = $spoolFileCount
+                    HasOrphanSpoolFiles = $hasOrphan
+                    Health              = $health
+                    IsHealthy           = $isHealthy
+                    Issues              = @($issues)
+                    Recommendation      = $recommendation
+                    Timestamp           = $diagTimestamp
+                }
+
+                $spoolCountText = if ($null -ne $spoolFileCount) { [string]$spoolFileCount } else { 'N/D' }
+                $logMessage = "Diagnóstico remoto concluído na máquina '$computerName': Health=$health, Serviço=$serviceStatus, Impressoras=$printerCount, Jobs=$jobCount, Travados=$($stuckJobs.Count), ArquivosPRINTERS=$spoolCountText."
+            }
+        }
+        catch {
+            $outcome = 'Failed'
+            $failureMessage = "Falha ao diagnosticar o spooler na máquina '$computerName': $($_.Exception.Message)"
+            $logMessage = $failureMessage
+        }
+    }
+    else {
+        try {
         $serviceStatus = [string](Get-SpoolerServiceStatus)
         if ([string]::IsNullOrWhiteSpace($serviceStatus)) {
             $serviceStatus = 'Unknown'
@@ -292,10 +384,11 @@
         $spoolCountText = if ($null -ne $spoolFileCount) { [string]$spoolFileCount } else { 'N/D' }
         $logMessage = "Diagnóstico concluído na máquina '$computerName': Health=$health, Serviço=$serviceStatus, Impressoras=$printerCount, Jobs=$jobCount, Travados=$($stuckJobs.Count), ArquivosPRINTERS=$spoolCountText."
     }
-    catch {
-        $outcome = 'Failed'
-        $failureMessage = "Falha ao diagnosticar o spooler na máquina '$computerName': $($_.Exception.Message)"
-        $logMessage = $failureMessage
+        catch {
+            $outcome = 'Failed'
+            $failureMessage = "Falha ao diagnosticar o spooler na máquina '$computerName': $($_.Exception.Message)"
+            $logMessage = $failureMessage
+        }
     }
 
     $logParams = @{

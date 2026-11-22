@@ -15,22 +15,123 @@
 
         [Parameter()]
         [ValidateRange(0, 365)]
-        [int]$BackupRetentionDays = 7
+        [int]$BackupRetentionDays = 7,
+
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ComputerName,
+
+        [Parameter()]
+        [PSCredential]$Credential,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$AllowedComputersPath,
+
+        [Parameter()]
+        [switch]$AllowPrintServer
     )
 
-    $computerName = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
-        $env:COMPUTERNAME
+    $hasCredential = ($PSBoundParameters.ContainsKey('Credential') -and $null -ne $Credential)
+    $targetParams = @{
+        HasCredential = $hasCredential
     }
-    else {
-        [System.Environment]::MachineName
+    if ($PSBoundParameters.ContainsKey('ComputerName')) {
+        $targetParams['ComputerName'] = $ComputerName
     }
+    if ($PSBoundParameters.ContainsKey('AllowedComputersPath')) {
+        $targetParams['AllowedComputersPath'] = $AllowedComputersPath
+    }
+
+    $target = Resolve-SpoolerTarget @targetParams
+    $computerName = [string]$target.ComputerName
 
     $actionName = 'Reset-Spooler'
     $timestamp = Get-Date
     $outcome = 'Failed'
     $message = ''
 
-    if (-not (Test-IsAdministrator)) {
+    if (-not $target.IsValid) {
+        $outcome = [string]$target.FailureOutcome
+        $message = [string]$target.ErrorMessage
+    }
+    elseif (-not $target.IsLocal) {
+        if (-not $SkipBackup -and $PSBoundParameters.ContainsKey('BackupPath') -and [string]::IsNullOrWhiteSpace($BackupPath)) {
+            $outcome = 'Failed'
+            $message = "Parâmetro -BackupPath inválido na máquina '$computerName': o caminho de backup não pode conter apenas espaços em branco."
+        }
+        elseif ($target.IsPrintServerListed -and -not $AllowPrintServer) {
+            $outcome = 'Failed'
+            $message = "Reset bloqueado na máquina '$computerName' (marcada como servidor de impressão na allow-list com '|PrintServer'). Informe -AllowPrintServer para confirmar a execução."
+        }
+        else {
+            $backupDescription = if ($SkipBackup) { 'sem backup (-SkipBackup)' } else { 'com backup prévio' }
+            $printServerNotice = if ($AllowPrintServer) { ' [SERVIDOR DE IMPRESSÃO]' } else { '' }
+            $actionDescription = "Parar o serviço Spooler, apagar arquivos .SPL e .SHD de PRINTERS ($backupDescription) e reiniciar o serviço na máquina remota '$computerName'$printServerNotice"
+
+            if (-not $PSCmdlet.ShouldProcess($computerName, $actionDescription)) {
+                if ($WhatIfPreference) {
+                    $outcome = 'Simulated'
+                    $message = "Simulação (-WhatIf): nenhuma alteração foi realizada na máquina remota '$computerName'."
+                }
+                else {
+                    $outcome = 'Skipped'
+                    $message = "Operação cancelada pelo usuário na confirmação para a máquina '$computerName'."
+                }
+            }
+            else {
+                $opParams = @{
+                    AllowPrintServer    = [bool]$AllowPrintServer
+                    BackupRetentionDays = $BackupRetentionDays
+                }
+                if ($SkipBackup) {
+                    $opParams['SkipBackup'] = $true
+                }
+                if ($PSBoundParameters.ContainsKey('BackupPath')) {
+                    $opParams['BackupPath'] = $BackupPath
+                }
+
+                $remoteParams = @{
+                    ComputerName = $computerName
+                    Operation    = $actionName
+                    Parameters   = $opParams
+                }
+                if ($hasCredential) {
+                    $remoteParams['Credential'] = $Credential
+                }
+
+                $remoteResult = Invoke-SpoolerRemoteOperation @remoteParams
+                if (-not $remoteResult.Success) {
+                    $outcome = [string]$remoteResult.Outcome
+                    $message = [string]$remoteResult.Message
+                }
+                elseif ($null -eq $remoteResult.Data) {
+                    $outcome = 'Failed'
+                    $message = "Resposta inválida ou vazia ao resetar o spooler na máquina '$computerName'."
+                }
+                else {
+                    $remoteData = $remoteResult.Data
+                    $outcomeProp = $remoteData.PSObject.Properties['Outcome']
+                    $messageProp = $remoteData.PSObject.Properties['Message']
+
+                    $outcome = if ($null -ne $outcomeProp -and -not [string]::IsNullOrWhiteSpace([string]$outcomeProp.Value)) {
+                        [string]$outcomeProp.Value
+                    }
+                    else {
+                        'Failed'
+                    }
+                    $message = if ($null -ne $messageProp -and -not [string]::IsNullOrWhiteSpace([string]$messageProp.Value)) {
+                        [string]$messageProp.Value
+                    }
+                    else {
+                        "Resultado remoto recebido sem mensagem detalhada ao resetar o spooler na máquina '$computerName'."
+                    }
+                }
+            }
+        }
+    }
+    elseif (-not (Test-IsAdministrator)) {
         $outcome = 'Failed'
         $message = "Permissão negada na máquina '$computerName': execute o PowerShell como Administrador para resetar o spooler."
     }
