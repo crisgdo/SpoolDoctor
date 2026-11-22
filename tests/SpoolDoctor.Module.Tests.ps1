@@ -3,6 +3,7 @@
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'
         $privateFolderPath = Join-Path -Path $repoRoot -ChildPath 'src\Private'
+        $remoteFolderPath = Join-Path -Path $repoRoot -ChildPath 'src\Remote'
 
         if (Get-Module -Name 'SpoolDoctor') {
             Remove-Module -Name 'SpoolDoctor' -Force -ErrorAction Stop
@@ -48,6 +49,30 @@
 
         foreach ($privateFunction in $privateFunctions) {
             $module.ExportedFunctions.Keys | Should -Not -Contain $privateFunction
+        }
+
+        $remoteFunctions = @(
+            Get-ChildItem -Path $remoteFolderPath -Filter '*.ps1' -File -ErrorAction Stop |
+                Select-Object -ExpandProperty BaseName
+        )
+        $expectedRemoteFunctions = @(
+            'Test-ValidComputerName',
+            'Get-AllowedComputer',
+            'Resolve-SpoolerTarget',
+            'Get-RemoteFailureOutcome',
+            'Test-SpoolerPrintServer',
+            'New-SpoolerRemoteSession',
+            'Invoke-SpoolerRemoteScript',
+            'Remove-SpoolerRemoteSession',
+            'Invoke-SpoolerRemoteOperation'
+        )
+        $remoteFunctions.Count | Should -Be $expectedRemoteFunctions.Count
+        foreach ($expectedRemote in $expectedRemoteFunctions) {
+            $remoteFunctions | Should -Contain $expectedRemote
+        }
+
+        foreach ($remoteFunction in $remoteFunctions) {
+            $module.ExportedFunctions.Keys | Should -Not -Contain $remoteFunction
         }
     }
 }
