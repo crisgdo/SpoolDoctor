@@ -52,6 +52,26 @@
         if (Get-Command -Name 'Confirm-SpoolDoctorAction' -ErrorAction SilentlyContinue) {
             Mock Confirm-SpoolDoctorAction { return $false }
         }
+        if (Get-Command -Name 'Test-Spooler' -ErrorAction SilentlyContinue) {
+            Mock Test-Spooler {
+                return [PSCustomObject]@{
+                    PSTypeName          = 'SpoolDoctor.Diagnostic'
+                    ComputerName        = $env:COMPUTERNAME
+                    ServiceStatus       = 'Running'
+                    PrinterCount        = 1
+                    UnhealthyPrinters   = @()
+                    JobCount            = 0
+                    StuckJobs           = @()
+                    SpoolFileCount      = 0
+                    HasOrphanSpoolFiles = $false
+                    Health              = 'Healthy'
+                    IsHealthy           = $true
+                    Issues              = @()
+                    Recommendation      = 'Spooler saudável. Nenhuma ação corretiva necessária.'
+                    Timestamp           = Get-Date
+                }
+            }
+        }
     }
 
     It 'possui ui/SpoolDoctorUI.ps1 válido no parser AST sem erros de sintaxe' {
@@ -121,6 +141,7 @@
         $commandNames | Should -Contain 'Get-SpoolerJob'
         $commandNames | Should -Contain 'Remove-SpoolerJob'
         $commandNames | Should -Contain 'Reset-Spooler'
+        $commandNames | Should -Contain 'Test-Spooler'
     }
 
     It 'formata tamanho, idade e ActionResult corretamente incluindo valores nulos' {
@@ -158,6 +179,7 @@
             $ui.Grid | Should -BeOfType [System.Windows.Forms.DataGridView]
             $ui.WhatIfCheckBox | Should -BeOfType [System.Windows.Forms.CheckBox]
             $ui.BackupCheckBox | Should -BeOfType [System.Windows.Forms.CheckBox]
+            $ui.DiagnoseButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.CancelButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.ResetButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.StatusTextBox | Should -BeOfType [System.Windows.Forms.TextBox]
@@ -174,6 +196,8 @@
 
             $ui.CancelButton.Enabled | Should -BeFalse
             $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.DiagnoseButton.Enabled | Should -BeTrue
+            $ui.DiagnoseButton.Text | Should -Match 'Diagnosticar'
             $ui.ResetButton.Enabled | Should -BeTrue
             $ui.WhatIfCheckBox.Checked | Should -BeFalse
             $ui.BackupCheckBox.Checked | Should -BeTrue
@@ -634,6 +658,86 @@
             $script:capturedSkipBackupArgs.ContainsKey('SkipBackup') | Should -BeTrue
             ([bool]$script:capturedSkipBackupArgs['SkipBackup']) | Should -BeTrue
             $ui.StatusTextBox.Text | Should -Match '\[OK\]'
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeTrue
+            $form.UseWaitCursor | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'executa Invoke-SpoolDoctorDiagnose chamando Test-Spooler e exibe diagnóstico completo no painel de status' {
+        $script:capturedDiagnoseLogPath = $null
+
+        Mock Test-Spooler {
+            param([string]$LogPath)
+            $script:capturedDiagnoseLogPath = $LogPath
+            return [PSCustomObject]@{
+                PSTypeName          = 'SpoolDoctor.Diagnostic'
+                ComputerName        = $env:COMPUTERNAME
+                ServiceStatus       = 'Running'
+                PrinterCount        = 2
+                UnhealthyPrinters   = @()
+                JobCount            = 1
+                StuckJobs           = @(
+                    [PSCustomObject]@{
+                        Id          = 501
+                        PrinterName = 'HP LaserJet'
+                        Document    = 'Contrato.pdf'
+                        Status      = 'Error'
+                        Age         = [timespan]::FromMinutes(22)
+                        Reason      = 'Status=Error; Idade=22m'
+                    }
+                )
+                SpoolFileCount      = $null
+                HasOrphanSpoolFiles = $false
+                Health              = 'Warning'
+                IsHealthy           = $false
+                Issues              = @(
+                    "Job 501 na impressora 'HP LaserJet' possivelmente travado.",
+                    'Sem permissão para ler PRINTERS (execute como Administrador).'
+                )
+                Recommendation      = 'Tente cancelar os jobs travados com Remove-SpoolerJob antes de executar Reset-Spooler.'
+                Timestamp           = [datetime]'2026-11-22T18:10:00'
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+
+            Invoke-SpoolDoctorDiagnose -Form $form
+
+            Should -Invoke Test-Spooler -Times 1 -Exactly
+            $script:capturedDiagnoseLogPath | Should -Be $script:logPath
+            $ui.StatusTextBox.Text | Should -Match 'Warning'
+            $ui.StatusTextBox.Text | Should -Match 'sem permissão/indisponível'
+            $ui.StatusTextBox.Text | Should -Match 'Job 501'
+            $ui.StatusTextBox.Text | Should -Match 'Remove-SpoolerJob'
+            $ui.DiagnoseButton.Enabled | Should -BeTrue
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeTrue
+            $form.UseWaitCursor | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'trata erro de Test-Spooler em Invoke-SpoolDoctorDiagnose sem quebrar a janela' {
+        Mock Test-Spooler {
+            throw 'Falha simulada durante diagnóstico.'
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+
+            { Invoke-SpoolDoctorDiagnose -Form $form } | Should -Not -Throw
+
+            $ui.StatusTextBox.Text | Should -Match 'Falha simulada durante diagnóstico\.'
+            $ui.DiagnoseButton.Enabled | Should -BeTrue
             $ui.RefreshButton.Enabled | Should -BeTrue
             $ui.ResetButton.Enabled | Should -BeTrue
             $form.UseWaitCursor | Should -BeFalse

@@ -28,6 +28,10 @@ Quando a fila de impressão trava, o v0 resolve apagando tudo e reiniciando o sp
   - Falha ao remover backups antigos registra aviso na mensagem e no log sem alterar o `Outcome` do reset para `Failed`.
 - **RF8.** Elevação automática: exigir ou solicitar administrador, em vez de depender do usuário.
 - **RF9.** Diagnóstico: serviço do spooler ativo, jobs parados há mais de N minutos, impressora respondendo.
+  - Operação somente leitura (`Test-Spooler`, sem `SupportsShouldProcess` e sem exigir elevação obrigatória), aceitando `-StuckThresholdMinutes` (`1..1440`, padrão `15`) e `-LogPath`.
+  - Consolida estado do serviço `Spooler`, impressoras com status de erro/offline (incluindo flags compostas separadas por vírgula), jobs travados (idade `>= $StuckThresholdMinutes` ou status problemático `Error`, `Blocked`, `Deleting`, `Offline`, `PaperOut`, `UserIntervention`) e arquivos `.SPL`/`.SHD` em `PRINTERS` (incluindo detecção de arquivos órfãos quando há arquivos e `0` jobs).
+  - Se a leitura de `PRINTERS` retornar acesso negado (`UnauthorizedAccessException`) sem privilégio de administrador, não interrompe o diagnóstico: define `SpoolFileCount = $null` e registra aviso claro em `Issues`.
+  - Falha ao consultar o serviço `Spooler` ou ao listar impressoras/jobs com o serviço ativo registra `Outcome = 'Failed'` no log e propaga o erro explicitamente.
 - **RF10. Execução remota:** executar RF1, RF2, RF3 e RF9 em outra máquina via `Invoke-Command` (WinRM), com relatório por máquina.
   - **Pré-requisitos (fora do controle do código):** WinRM habilitado na máquina de destino e conta com permissão de administrador nela. Em ambiente corporativo, isso depende do setor de TI: combinar com a TI **antes** de testar em máquinas reais.
 - **RF11.** Interface gráfica (WinForms dentro do PowerShell) com lista de jobs, botões e confirmação.
@@ -53,6 +57,7 @@ Spec atualizado, testes Pester passando, PSScriptAnalyzer sem avisos, teste manu
 - **PrintJob:** `Id`, `PrinterName`, `Document`, `SizeBytes`, `SubmittedAt`, `Age` (`[timespan]` ou `$null` se `SubmittedAt` estiver ausente; clamp em `[timespan]::Zero` para timestamps futuros), `Status`, `ComputerName`.
 - **SpoolerService:** estado (`Running`, `Stopped`, ...), máquina.
 - **ActionResult:** `ComputerName`, `Action`, `Outcome` (`OK`, `Failed`, `Unreachable`, `Skipped`, `Simulated`), `Message`, `Timestamp`.
+- **SpoolerDiagnostic:** `ComputerName`, `ServiceStatus`, `PrinterCount`, `UnhealthyPrinters`, `JobCount`, `StuckJobs`, `SpoolFileCount` (`[int]` ou `$null` se leitura de `PRINTERS` indisponível/negada), `HasOrphanSpoolFiles`, `Health` (`Healthy`, `Warning`, `Critical`), `IsHealthy`, `Issues`, `Recommendation`, `Timestamp`.
 - **TargetList:** lista de máquinas permitidas (allow-list) lida de arquivo.
 
 Relações: Printer 1..N PrintJob; cada ação produz um ActionResult por máquina.
