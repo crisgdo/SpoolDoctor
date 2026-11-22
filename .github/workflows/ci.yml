@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-lint:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências de desenvolvimento (Pester 5+ e PSScriptAnalyzer)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+          Install-Module -Name Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck -Repository PSGallery
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -Repository PSGallery
+
+      - name: Executar testes Pester 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module -Name Pester -MinimumVersion 5.0 -Force
+          Invoke-Pester -Path ./tests -CI
+
+      - name: Executar PSScriptAnalyzer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module -Name PSScriptAnalyzer -Force
+          $paths = @('./src', './ui') | Where-Object { Test-Path -Path $_ }
+          $issues = foreach ($path in $paths) {
+              Invoke-ScriptAnalyzer -Path $path -Recurse -Severity Warning,Error
+          }
+          if ($issues) {
+              $issues | Format-Table -AutoSize
+              exit 1
+          }

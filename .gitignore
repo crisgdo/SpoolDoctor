@@ -1,0 +1,31 @@
+# Logs e backups locais
+*.log
+logs/
+backups/
+
+# Resultados de testes e artefatos temporários (Pester / CI)
+testResults.xml
+TestResults/
+coverage.xml
+*.tmp
+*.bak
+
+# Arquivos de sistema do Windows
+Thumbs.db
+Desktop.ini
+desktop.ini
+ehthumbs.db
+
+# Editores / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Segurança: nunca versionar arquivos de credenciais ou certificados
+*.pfx
+*.cer
+*.key
+*.xml.cred
+*.clixml

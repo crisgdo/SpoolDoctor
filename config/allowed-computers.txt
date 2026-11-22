@@ -1,0 +1,12 @@
+# Lista de máquinas autorizadas para execução remota (allow-list) do SpoolDoctor.
+#
+# Regras de formato:
+# - Informe um nome de computador (hostname ou FQDN) por linha.
+# - Linhas em branco e linhas iniciadas por '#' são ignoradas.
+# - Espaços no início e no fim da linha são ignorados.
+# - Nunca coloque senhas ou credenciais neste arquivo.
+# - Servidores de impressão ficam bloqueados por padrão (exigem confirmação reforçada).
+#
+# Exemplos (descomente e substitua apenas por máquinas autorizadas pela TI):
+# PC-FINANCEIRO-01
+# ESTACAO-ATENDIMENTO-02.empresa.local
