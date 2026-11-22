@@ -4,7 +4,18 @@
     param(
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string]$LogPath
+        [string]$LogPath,
+
+        [Parameter()]
+        [switch]$SkipBackup,
+
+        [Parameter()]
+        [ValidateNotNullOrEmpty()]
+        [string]$BackupPath,
+
+        [Parameter()]
+        [ValidateRange(0, 365)]
+        [int]$BackupRetentionDays = 7
     )
 
     $computerName = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
@@ -23,8 +34,13 @@
         $outcome = 'Failed'
         $message = "Permissão negada na máquina '$computerName': execute o PowerShell como Administrador para resetar o spooler."
     }
+    elseif (-not $SkipBackup -and $PSBoundParameters.ContainsKey('BackupPath') -and [string]::IsNullOrWhiteSpace($BackupPath)) {
+        $outcome = 'Failed'
+        $message = "Parâmetro -BackupPath inválido na máquina '$computerName': o caminho de backup não pode conter apenas espaços em branco."
+    }
     else {
-        $actionDescription = "Parar o serviço Spooler, apagar arquivos .SPL e .SHD de PRINTERS e reiniciar o serviço na máquina '$computerName'"
+        $backupDescription = if ($SkipBackup) { 'sem backup (-SkipBackup)' } else { 'com backup prévio' }
+        $actionDescription = "Parar o serviço Spooler, apagar arquivos .SPL e .SHD de PRINTERS ($backupDescription) e reiniciar o serviço na máquina '$computerName'"
         if (-not $PSCmdlet.ShouldProcess($computerName, $actionDescription)) {
             if ($WhatIfPreference) {
                 $outcome = 'Simulated'
@@ -38,14 +54,36 @@
         else {
             $serviceStopped = $false
             $startAttempted = $false
+            $backedUpCount = 0
             $removedCount = 0
+            $defaultBackupRoot = $null
+            $effectiveBackupDirectory = $null
             $failureMessage = $null
 
             try {
+                if (-not $SkipBackup) {
+                    if ($PSBoundParameters.ContainsKey('BackupPath')) {
+                        $effectiveBackupDirectory = $BackupPath
+                    }
+                    else {
+                        $programDataRoot = $env:ProgramData
+                        if ([string]::IsNullOrWhiteSpace($programDataRoot)) {
+                            $programDataRoot = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)
+                        }
+                        if ([string]::IsNullOrWhiteSpace($programDataRoot)) {
+                            throw 'A variável de ambiente ProgramData não está definida para gravar o backup.'
+                        }
+
+                        $defaultBackupRoot = Join-Path -Path $programDataRoot -ChildPath 'SpoolDoctor\backups'
+                        $effectiveBackupDirectory = Join-Path -Path $defaultBackupRoot -ChildPath $timestamp.ToString('yyyyMMdd-HHmmss')
+                    }
+                }
+
                 Stop-SpoolerService -Confirm:$false
                 $serviceStopped = $true
 
                 $spoolFiles = @(Get-SpoolFile)
+                $validatedPaths = New-Object -TypeName 'System.Collections.Generic.List[string]'
                 foreach ($file in $spoolFiles) {
                     $filePath = if ($null -eq $file) {
                         ''
@@ -61,6 +99,17 @@
                         throw "Caminho inseguro detectado e recusado durante o reset: '$filePath'."
                     }
 
+                    $validatedPaths.Add($filePath)
+                }
+
+                if (-not $SkipBackup -and $validatedPaths.Count -gt 0) {
+                    foreach ($filePath in $validatedPaths) {
+                        Copy-SpoolFile -Path $filePath -DestinationDirectory $effectiveBackupDirectory -Confirm:$false
+                        $backedUpCount++
+                    }
+                }
+
+                foreach ($filePath in $validatedPaths) {
                     Remove-SpoolFile -Path $filePath -Confirm:$false
                     $removedCount++
                 }
@@ -97,7 +146,38 @@
                     }
                     else {
                         $outcome = 'OK'
-                        $message = "Spooler reiniciado com sucesso na máquina '$computerName'. Arquivos removidos: $removedCount. Serviço em execução e fila vazia."
+                        if ($SkipBackup) {
+                            $message = "Spooler reiniciado com sucesso na máquina '$computerName'. Arquivos removidos: $removedCount. Backup ignorado (-SkipBackup). Serviço em execução e fila vazia."
+                        }
+                        elseif ($backedUpCount -gt 0) {
+                            $message = "Spooler reiniciado com sucesso na máquina '$computerName'. Backup realizado: $backedUpCount arquivo(s) em '$effectiveBackupDirectory'. Arquivos removidos: $removedCount. Serviço em execução e fila vazia."
+                        }
+                        else {
+                            $message = "Spooler reiniciado com sucesso na máquina '$computerName'. Arquivos removidos: 0 (fila já vazia; nenhum backup necessário). Serviço em execução e fila vazia."
+                        }
+
+                        if (-not $SkipBackup -and $BackupRetentionDays -gt 0 -and -not [string]::IsNullOrWhiteSpace($defaultBackupRoot)) {
+                            try {
+                                $cleanupResult = Remove-OldSpoolBackup -BackupRoot $defaultBackupRoot -RetentionDays $BackupRetentionDays -Confirm:$false
+                                if ($null -ne $cleanupResult) {
+                                    $removedProp = $cleanupResult.PSObject.Properties['RemovedCount']
+                                    if ($null -ne $removedProp -and [int]$removedProp.Value -gt 0) {
+                                        $message = "$message Backups antigos removidos: $([int]$removedProp.Value)."
+                                    }
+
+                                    $warningsProp = $cleanupResult.PSObject.Properties['Warnings']
+                                    if ($null -ne $warningsProp -and $null -ne $warningsProp.Value) {
+                                        $cleanupWarnings = @($warningsProp.Value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                                        if ($cleanupWarnings.Count -gt 0) {
+                                            $message = "$message Aviso na limpeza de backups antigos: $($cleanupWarnings -join ' ')"
+                                        }
+                                    }
+                                }
+                            }
+                            catch {
+                                $message = "$message Aviso na limpeza de backups antigos: $($_.Exception.Message)"
+                            }
+                        }
                     }
                 }
                 catch {

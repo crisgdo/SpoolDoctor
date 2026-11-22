@@ -42,6 +42,8 @@
         $privateFunctions | Should -Contain 'Get-SpoolerPrinterRaw'
         $privateFunctions | Should -Contain 'Get-SpoolerJobRaw'
         $privateFunctions | Should -Contain 'Remove-SpoolerJobRaw'
+        $privateFunctions | Should -Contain 'Copy-SpoolFile'
+        $privateFunctions | Should -Contain 'Remove-OldSpoolBackup'
 
         foreach ($privateFunction in $privateFunctions) {
             $module.ExportedFunctions.Keys | Should -Not -Contain $privateFunction
