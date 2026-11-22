@@ -9,7 +9,7 @@
     PowerShellVersion = '5.1'
 
     # Preencher explicitamente com os nomes das funções de src/Public conforme forem criadas.
-    FunctionsToExport = @('Reset-Spooler')
+    FunctionsToExport = @('Get-SpoolerJob', 'Reset-Spooler')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()

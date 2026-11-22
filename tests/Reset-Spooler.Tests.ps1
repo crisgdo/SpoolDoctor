@@ -1,4 +1,4 @@
-Describe 'SpoolDoctor - Reset-Spooler' {
+﻿Describe 'SpoolDoctor - Reset-Spooler' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'
