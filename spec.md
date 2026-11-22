@@ -45,7 +45,7 @@ Spec atualizado, testes Pester passando, PSScriptAnalyzer sem avisos, teste manu
 ## E: Entities
 
 - **Printer:** `Name`, `Status`, `PortName`.
-- **PrintJob:** `Id`, `PrinterName`, `Document`, `SizeBytes`, `SubmittedAt`, `Status`, `ComputerName`.
+- **PrintJob:** `Id`, `PrinterName`, `Document`, `SizeBytes`, `SubmittedAt`, `Age` (`[timespan]` ou `$null` se `SubmittedAt` estiver ausente; clamp em `[timespan]::Zero` para timestamps futuros), `Status`, `ComputerName`.
 - **SpoolerService:** estado (`Running`, `Stopped`, ...), máquina.
 - **ActionResult:** `ComputerName`, `Action`, `Outcome` (`OK`, `Failed`, `Unreachable`, `Skipped`, `Simulated`), `Message`, `Timestamp`.
 - **TargetList:** lista de máquinas permitidas (allow-list) lida de arquivo.
@@ -57,7 +57,7 @@ Relações: Printer 1..N PrintJob; cada ação produz um ActionResult por máqui
 ## A: Approach
 
 - **Módulo `.psm1`** com a lógica em funções pequenas; a interface e o launcher são camadas finas por cima.
-- **Isolamento do sistema:** só poucas funções privadas tocam o sistema. Cada uma é um wrapper fino com **nome próprio** (ex.: `Get-SpoolerJobRaw`, `Remove-SpoolerJobRaw`, `Get-SpoolerServiceStatus`, `Stop-SpoolerService`, `Start-SpoolerService`, `Get-SpoolFile`, `Remove-SpoolFile`, `Copy-SpoolFile`) que chama o cmdlet nativo por dentro (`Get-PrintJob`, `Remove-PrintJob`, `Get-Service`, `Stop-Service`, `Start-Service`, `Get-ChildItem`, `Remove-Item`, `Copy-Item`). Nunca criar função com o mesmo nome de um cmdlet nativo. Os testes substituem os wrappers com `Mock` (Pester 5, usando `-ModuleName SpoolDoctor`).
+- **Isolamento do sistema:** só poucas funções privadas tocam o sistema. Cada uma é um wrapper fino com **nome próprio** (ex.: `Get-SpoolerPrinterRaw`, `Get-SpoolerJobRaw`, `Remove-SpoolerJobRaw`, `Get-SpoolerServiceStatus`, `Stop-SpoolerService`, `Start-SpoolerService`, `Get-SpoolFile`, `Remove-SpoolFile`, `Copy-SpoolFile`) que chama o cmdlet nativo por dentro (`Get-Printer`, `Get-PrintJob`, `Remove-PrintJob`, `Get-Service`, `Stop-Service`, `Start-Service`, `Get-ChildItem`, `Remove-Item`, `Copy-Item`). Nunca criar função com o mesmo nome de um cmdlet nativo. Os testes substituem os wrappers com `Mock` (Pester 5, usando `-ModuleName SpoolDoctor`).
 - **Remoto como camada de despacho sem instalação prévia:** uma função em `src/Remote` decide *onde* executar (local ou `Invoke-Command`) sem alterar a lógica do reset. Como nada é instalado nas máquinas de destino, o despacho remoto injeta os *scriptblocks*/funções necessários diretamente na sessão remota.
 - **Escalonamento do reparo:** primeiro cancelar o job; só então reset do spooler.
 - **Recuperação em falha parcial:** se `Reset-Spooler` parar o serviço `Spooler` e ocorrer erro na remoção dos arquivos, a função tenta iniciar o serviço novamente no bloco `finally` antes de retornar `ActionResult` com `Outcome = 'Failed'`, evitando deixar a máquina com o serviço parado.

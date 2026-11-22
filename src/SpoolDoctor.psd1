@@ -1,4 +1,4 @@
-﻿@{
+@{
     RootModule        = 'SpoolDoctor.psm1'
     ModuleVersion     = '0.1.0'
     GUID              = 'a8c4e2b1-7d3f-4c9a-9e52-1b6f0d8a3c4e'
@@ -9,7 +9,7 @@
     PowerShellVersion = '5.1'
 
     # Preencher explicitamente com os nomes das funções de src/Public conforme forem criadas.
-    FunctionsToExport = @('Reset-Spooler')
+    FunctionsToExport = @('Get-SpoolerJob', 'Reset-Spooler')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()
