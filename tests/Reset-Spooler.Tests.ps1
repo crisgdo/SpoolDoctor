@@ -796,4 +796,336 @@ Reset-Spooler -ComputerName 'PC-REMOTO-01' -AllowedComputersPath '$childAllowPat
             $logLines[0] | Should -Match 'Outcome=Failed'
         }
     }
+
+    Context 'Execução remota em lote (Operação 7)' {
+        BeforeEach {
+            $script:batchAllowListPath = Join-Path -Path 'TestDrive:\' -ChildPath ("reset-batch-allow-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            @(
+                'PC-REMOTO-01'
+                'PC-REMOTO-02'
+                'PC-REMOTO-03'
+                'SRV-PRINT-01|PrintServer'
+            ) | Set-Content -LiteralPath $script:batchAllowListPath -Encoding UTF8
+
+            $script:openedSessionTargets = New-Object -TypeName 'System.Collections.Generic.List[string]'
+            $script:closedSessionTargets = New-Object -TypeName 'System.Collections.Generic.List[string]'
+
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param([string]$ComputerName, [PSCredential]$Credential)
+                $script:openedSessionTargets.Add($ComputerName)
+                return [PSCustomObject]@{ ComputerName = $ComputerName; Id = $script:openedSessionTargets.Count }
+            }
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $targetHost = [string]$ArgumentList[0]
+                return [PSCustomObject]@{
+                    PSTypeName   = 'Deserialized.SpoolDoctor.ActionResult'
+                    ComputerName = $targetHost
+                    Action       = 'Reset-Spooler'
+                    Outcome      = 'OK'
+                    Message      = "Spooler reiniciado com sucesso na máquina '$targetHost'."
+                    Timestamp    = Get-Date
+                }
+            }
+            Mock Remove-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param($Session)
+                $script:closedSessionTargets.Add([string]$Session.ComputerName)
+            }
+        }
+
+        It 'executa lote 100% bem-sucedido em 3 máquinas com logs e encerramento de todas as sessões' {
+            $results = @(Reset-Spooler -ComputerName @('PC-REMOTO-01', 'pc-remoto-02', 'PC-REMOTO-03') -AllowedComputersPath $script:batchAllowListPath -Confirm:$false -LogPath $script:logPath)
+
+            $results.Count | Should -Be 3
+            $results[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $results[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $results[2].ComputerName | Should -Be 'PC-REMOTO-03'
+            foreach ($res in $results) {
+                $res.PSObject.TypeNames | Should -Contain 'SpoolDoctor.ActionResult'
+                $res.Action | Should -Be 'Reset-Spooler'
+                $res.Outcome | Should -Be 'OK'
+            }
+
+            $script:openedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 3
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=OK'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=OK'
+            $logLines[2] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'isola falha Unreachable no meio do lote, fecha a sessão no finally e continua para a próxima máquina' {
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $targetHost = [string]$ArgumentList[0]
+                if ($targetHost -eq 'PC-REMOTO-02') {
+                    throw (New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'WinRM unreachable on PC-REMOTO-02.')
+                }
+                return [PSCustomObject]@{
+                    PSTypeName   = 'Deserialized.SpoolDoctor.ActionResult'
+                    ComputerName = $targetHost
+                    Action       = 'Reset-Spooler'
+                    Outcome      = 'OK'
+                    Message      = "Spooler reiniciado com sucesso na máquina '$targetHost'."
+                    Timestamp    = Get-Date
+                }
+            }
+
+            $results = @(Reset-Spooler -ComputerName @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03') -AllowedComputersPath $script:batchAllowListPath -Confirm:$false -LogPath $script:logPath)
+
+            $results.Count | Should -Be 3
+            $results[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $results[0].Outcome | Should -Be 'OK'
+            $results[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $results[1].Outcome | Should -Be 'Unreachable'
+            $results[2].ComputerName | Should -Be 'PC-REMOTO-03'
+            $results[2].Outcome | Should -Be 'OK'
+
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 3
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=OK'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=Unreachable'
+            $logLines[2] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'isola máquina fora da allow-list, servidor de impressão bloqueado, entrada vazia e erro de autenticação no lote' {
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param([string]$ComputerName, [PSCredential]$Credential)
+                if ($ComputerName -eq 'PC-REMOTO-02') {
+                    throw (New-Object -TypeName System.UnauthorizedAccessException -ArgumentList 'Access is denied.')
+                }
+                $script:openedSessionTargets.Add($ComputerName)
+                return [PSCustomObject]@{ ComputerName = $ComputerName; Id = $script:openedSessionTargets.Count }
+            }
+
+            $targets = @('PC-REMOTO-01', 'PC-INTRUSO', 'SRV-PRINT-01', '', 'PC-REMOTO-02', 'PC-REMOTO-03')
+            $results = @(Reset-Spooler -ComputerName $targets -AllowedComputersPath $script:batchAllowListPath -Confirm:$false -LogPath $script:logPath)
+
+            $results.Count | Should -Be 6
+            $results[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $results[0].Outcome | Should -Be 'OK'
+            $results[1].ComputerName | Should -Be 'PC-INTRUSO'
+            $results[1].Outcome | Should -Be 'Failed'
+            $results[1].Message | Should -Match 'allow-list'
+            $results[2].ComputerName | Should -Be 'SRV-PRINT-01'
+            $results[2].Outcome | Should -Be 'Failed'
+            $results[2].Message | Should -Match 'AllowPrintServer'
+            $results[3].ComputerName | Should -Be '(inválido)'
+            $results[3].Outcome | Should -Be 'Failed'
+            $results[4].ComputerName | Should -Be 'PC-REMOTO-02'
+            $results[4].Outcome | Should -Be 'Failed'
+            $results[5].ComputerName | Should -Be 'PC-REMOTO-03'
+            $results[5].Outcome | Should -Be 'OK'
+
+            $script:openedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-03')
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 6
+            $logLines[1] | Should -Match 'Computer=PC-INTRUSO.*Outcome=Failed'
+            $logLines[2] | Should -Match 'Computer=SRV-PRINT-01.*Outcome=Failed'
+            $logLines[3] | Should -Match 'Computer=\(inválido\).*Outcome=Failed'
+            $logLines[4] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=Failed'
+            $logLines[5] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'em modo -WhatIf no lote não abre sessão WinRM e retorna Simulated por máquina autorizada' {
+            $results = @(Reset-Spooler -ComputerName @('PC-REMOTO-01', 'SRV-PRINT-01', 'PC-REMOTO-02') -AllowedComputersPath $script:batchAllowListPath -WhatIf -LogPath $script:logPath)
+
+            $results.Count | Should -Be 3
+            $results[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $results[0].Outcome | Should -Be 'Simulated'
+            $results[1].ComputerName | Should -Be 'SRV-PRINT-01'
+            $results[1].Outcome | Should -Be 'Failed'
+            $results[2].ComputerName | Should -Be 'PC-REMOTO-02'
+            $results[2].Outcome | Should -Be 'Simulated'
+
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 0 -Exactly
+            Should -Invoke Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor -Times 0 -Exactly
+            Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 0 -Exactly
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 3
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=Simulated'
+            $logLines[1] | Should -Match 'Computer=SRV-PRINT-01.*Outcome=Failed'
+            $logLines[2] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=Simulated'
+        }
+
+        It 'avalia -Confirm individualmente por máquina exibindo o hostname correspondente' {
+            if (-not ('SpoolDoctorBatchConfirmTestHost' -as [type])) {
+                Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Management.Automation;
+using System.Management.Automation.Host;
+using System.Security;
+
+public class SpoolDoctorBatchConfirmTestRawUI : PSHostRawUserInterface {
+    public override ConsoleColor BackgroundColor { get { return ConsoleColor.Black; } set {} }
+    public override ConsoleColor ForegroundColor { get { return ConsoleColor.White; } set {} }
+    public override Coordinates CursorPosition { get { return new Coordinates(0, 0); } set {} }
+    public override Coordinates WindowPosition { get { return new Coordinates(0, 0); } set {} }
+    public override int CursorSize { get { return 1; } set {} }
+    public override Size BufferSize { get { return new Size(120, 50); } set {} }
+    public override Size WindowSize { get { return new Size(120, 50); } set {} }
+    public override Size MaxWindowSize { get { return new Size(120, 50); } }
+    public override Size MaxPhysicalWindowSize { get { return new Size(120, 50); } }
+    public override bool KeyAvailable { get { return false; } }
+    public override string WindowTitle { get { return "Test"; } set {} }
+    public override void FlushInputBuffer() {}
+    public override BufferCell[,] GetBufferContents(Rectangle rectangle) { return new BufferCell[0, 0]; }
+    public override KeyInfo ReadKey(ReadKeyOptions options) { return new KeyInfo(); }
+    public override void ScrollBufferContents(Rectangle source, Coordinates destination, Rectangle clip, BufferCell fill) {}
+    public override void SetBufferContents(Coordinates origin, BufferCell[,] contents) {}
+    public override void SetBufferContents(Rectangle rectangle, BufferCell fill) {}
+}
+
+public class SpoolDoctorBatchConfirmTestHostUI : PSHostUserInterface {
+    public Queue<int> Responses = new Queue<int>();
+    public List<string> Prompts = new List<string>();
+    private PSHostRawUserInterface _raw = new SpoolDoctorBatchConfirmTestRawUI();
+    public override PSHostRawUserInterface RawUI { get { return _raw; } }
+    public override int PromptForChoice(string caption, string message, Collection<ChoiceDescription> choices, int defaultChoice) {
+        Prompts.Add(caption + " | " + message);
+        return Responses.Count > 0 ? Responses.Dequeue() : defaultChoice;
+    }
+    public override string ReadLine() { return string.Empty; }
+    public override SecureString ReadLineAsSecureString() { return new SecureString(); }
+    public override void Write(string value) {}
+    public override void Write(ConsoleColor foregroundColor, ConsoleColor backgroundColor, string value) {}
+    public override void WriteLine(string value) {}
+    public override void WriteErrorLine(string value) {}
+    public override void WriteDebugLine(string message) {}
+    public override void WriteProgress(long sourceId, ProgressRecord record) {}
+    public override void WriteVerboseLine(string message) {}
+    public override void WriteWarningLine(string message) {}
+    public override Dictionary<string, PSObject> Prompt(string caption, string message, Collection<FieldDescription> descriptions) { return new Dictionary<string, PSObject>(); }
+    public override PSCredential PromptForCredential(string caption, string message, string userName, string targetName) { return null; }
+    public override PSCredential PromptForCredential(string caption, string message, string userName, string targetName, PSCredentialTypes allowedCredentialTypes, PSCredentialUIOptions options) { return null; }
+}
+
+public class SpoolDoctorBatchConfirmTestHost : PSHost {
+    private Guid _id = Guid.NewGuid();
+    private SpoolDoctorBatchConfirmTestHostUI _ui = new SpoolDoctorBatchConfirmTestHostUI();
+    public SpoolDoctorBatchConfirmTestHostUI TestUI { get { return _ui; } }
+    public override string Name { get { return "SpoolDoctorBatchConfirmTestHost"; } }
+    public override Version Version { get { return new Version(1, 0); } }
+    public override Guid InstanceId { get { return _id; } }
+    public override PSHostUserInterface UI { get { return _ui; } }
+    public override CultureInfo CurrentCulture { get { return CultureInfo.InvariantCulture; } }
+    public override CultureInfo CurrentUICulture { get { return CultureInfo.InvariantCulture; } }
+    public override void SetShouldExit(int exitCode) {}
+    public override void EnterNestedPrompt() {}
+    public override void ExitNestedPrompt() {}
+    public override void NotifyBeginApplication() {}
+    public override void NotifyEndApplication() {}
+}
+"@
+            }
+
+            $physicalTestDrive = (Get-PSDrive -Name 'TestDrive').Root
+            $childLogPath = Join-Path -Path $physicalTestDrive -ChildPath ("reset-batch-confirm-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            $childAllowPath = Join-Path -Path $physicalTestDrive -ChildPath ("reset-batch-allow-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            @('PC-REMOTO-01', 'PC-REMOTO-02') | Set-Content -LiteralPath $childAllowPath -Encoding UTF8
+
+            $testHost = New-Object -TypeName SpoolDoctorBatchConfirmTestHost
+            $testHost.TestUI.Responses.Enqueue(2) # No para PC-REMOTO-01
+            $testHost.TestUI.Responses.Enqueue(0) # Yes para PC-REMOTO-02
+
+            $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($testHost)
+            $runspace.Open()
+            $ps = $null
+            try {
+                $ps = [System.Management.Automation.PowerShell]::Create()
+                $ps.Runspace = $runspace
+                $null = $ps.AddScript(@"
+`$ErrorActionPreference = 'Stop'
+Import-Module -Name '$manifestPath' -Force
+& (Get-Module -Name 'SpoolDoctor') {
+    function script:New-SpoolerRemoteSession {
+        [CmdletBinding(SupportsShouldProcess)]
+        param([string]`$ComputerName, [PSCredential]`$Credential)
+        if (`$ComputerName -eq 'PC-REMOTO-01') { throw 'Não deveria abrir sessão para PC-REMOTO-01.' }
+        return [PSCustomObject]@{ ComputerName = `$ComputerName; Id = 1 }
+    }
+    function script:Invoke-SpoolerRemoteScript {
+        param(`$Session, `$ScriptBlock, `$ArgumentList)
+        return [PSCustomObject]@{
+            PSTypeName   = 'Deserialized.SpoolDoctor.ActionResult'
+            ComputerName = [string]`$ArgumentList[0]
+            Action       = 'Reset-Spooler'
+            Outcome      = 'OK'
+            Message      = "Spooler reiniciado com sucesso na máquina '`$(`$ArgumentList[0])'."
+            Timestamp    = Get-Date
+        }
+    }
+    function script:Remove-SpoolerRemoteSession { [CmdletBinding(SupportsShouldProcess)] param(`$Session) }
+}
+Reset-Spooler -ComputerName @('PC-REMOTO-01', 'PC-REMOTO-02') -AllowedComputersPath '$childAllowPath' -LogPath '$childLogPath'
+"@)
+                $parsed = @($ps.Invoke())
+                $ps.HadErrors | Should -BeFalse -Because ($ps.Streams.Error -join '; ')
+            }
+            finally {
+                if ($null -ne $ps) {
+                    $ps.Dispose()
+                }
+                $runspace.Dispose()
+            }
+
+            $testHost.TestUI.Prompts.Count | Should -Be 2
+            $testHost.TestUI.Prompts[0] | Should -Match 'PC-REMOTO-01'
+            $testHost.TestUI.Prompts[1] | Should -Match 'PC-REMOTO-02'
+
+            $parsed.Count | Should -Be 2
+            $parsed[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $parsed[0].Outcome | Should -Be 'Skipped'
+            $parsed[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $parsed[1].Outcome | Should -Be 'OK'
+
+            $logLines = @(Get-Content -LiteralPath $childLogPath -Encoding UTF8)
+            $logLines.Count | Should -Be 2
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=Skipped'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=OK'
+        }
+
+        It 'suporta lote misto local e remoto, deduplica alvos e recusa array vazio em StrictMode' {
+            $mixedResults = @(& {
+                Set-StrictMode -Version Latest
+                Reset-Spooler -ComputerName @('localhost', $env:COMPUTERNAME, 'pc-remoto-01', 'PC-REMOTO-01') -AllowedComputersPath $script:batchAllowListPath -Confirm:$false -LogPath $script:logPath
+            })
+
+            $mixedResults.Count | Should -Be 2
+            $mixedResults[0].ComputerName | Should -Be $env:COMPUTERNAME
+            $mixedResults[0].Outcome | Should -Be 'OK'
+            $mixedResults[1].ComputerName | Should -Be 'PC-REMOTO-01'
+            $mixedResults[1].Outcome | Should -Be 'OK'
+
+            Should -Invoke Stop-SpoolerService -ModuleName SpoolDoctor -Times 1 -Exactly
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+            Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+
+            $emptyLog = Join-Path -Path 'TestDrive:\' -ChildPath ("reset-empty-batch-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            $emptyResults = @(& {
+                Set-StrictMode -Version Latest
+                Reset-Spooler -ComputerName @() -AllowedComputersPath $script:batchAllowListPath -Confirm:$false -LogPath $emptyLog
+            })
+
+            $emptyResults.Count | Should -Be 1
+            $emptyResults[0].ComputerName | Should -Be '(inválido)'
+            $emptyResults[0].Outcome | Should -Be 'Failed'
+            Should -Invoke Stop-SpoolerService -ModuleName SpoolDoctor -Times 1 -Exactly
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+
+            $emptyLogs = @(Get-Content -LiteralPath $emptyLog -Encoding UTF8)
+            $emptyLogs.Count | Should -Be 1
+            $emptyLogs[0] | Should -Match 'Computer=\(inválido\).*Outcome=Failed'
+        }
+    }
 }

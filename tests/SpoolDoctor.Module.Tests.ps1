@@ -59,6 +59,7 @@
             'Test-ValidComputerName',
             'Get-AllowedComputer',
             'Resolve-SpoolerTarget',
+            'Resolve-SpoolerTargetList',
             'Get-RemoteFailureOutcome',
             'Test-SpoolerPrintServer',
             'New-SpoolerRemoteSession',

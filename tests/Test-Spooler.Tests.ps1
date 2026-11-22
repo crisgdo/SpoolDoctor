@@ -406,4 +406,194 @@
             $logLines[0] | Should -Match 'Outcome=Failed'
         }
     }
+
+    Context 'Execução remota em lote (Operação 7)' {
+        BeforeEach {
+            $script:batchAllowListPath = Join-Path -Path 'TestDrive:\' -ChildPath ("test-spooler-batch-allow-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            @(
+                'PC-REMOTO-01'
+                'PC-REMOTO-02'
+                'PC-REMOTO-03'
+                'SRV-PRINT-01|PrintServer'
+            ) | Set-Content -LiteralPath $script:batchAllowListPath -Encoding UTF8
+
+            $script:openedSessionTargets = New-Object -TypeName 'System.Collections.Generic.List[string]'
+            $script:closedSessionTargets = New-Object -TypeName 'System.Collections.Generic.List[string]'
+
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param([string]$ComputerName, [PSCredential]$Credential)
+                $script:openedSessionTargets.Add($ComputerName)
+                return [PSCustomObject]@{ ComputerName = $ComputerName; Id = $script:openedSessionTargets.Count }
+            }
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $targetHost = [string]$ArgumentList[0]
+                $health = switch ($targetHost) {
+                    'PC-REMOTO-01' { 'Healthy' }
+                    'PC-REMOTO-02' { 'Warning' }
+                    default        { 'Critical' }
+                }
+                return [PSCustomObject]@{
+                    PSTypeName          = 'Deserialized.SpoolDoctor.Diagnostic'
+                    ComputerName        = $targetHost
+                    ServiceStatus       = if ($health -eq 'Critical') { 'Stopped' } else { 'Running' }
+                    PrinterCount        = 1
+                    UnhealthyPrinters   = @()
+                    JobCount            = if ($health -eq 'Warning') { 1 } else { 0 }
+                    StuckJobs           = @()
+                    SpoolFileCount      = 0
+                    HasOrphanSpoolFiles = $false
+                    Health              = $health
+                    IsHealthy           = ($health -eq 'Healthy')
+                    Issues              = if ($health -eq 'Healthy') { @() } else { @("Alerta em $targetHost") }
+                    Recommendation      = "Recomendação para $targetHost"
+                    Timestamp           = Get-Date
+                }
+            }
+            Mock Remove-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param($Session)
+                $script:closedSessionTargets.Add([string]$Session.ComputerName)
+            }
+        }
+
+        It 'executa diagnóstico em lote 100% bem-sucedido em 3 máquinas retornando SpoolDoctor.Diagnostic e logs' {
+            $diags = @(Test-Spooler -ComputerName @('PC-REMOTO-01', 'pc-remoto-02', 'PC-REMOTO-03') -AllowedComputersPath $script:batchAllowListPath -LogPath $script:logPath)
+
+            $diags.Count | Should -Be 3
+            foreach ($diag in $diags) {
+                $diag.PSObject.TypeNames | Should -Contain 'SpoolDoctor.Diagnostic'
+            }
+            $diags[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $diags[0].Health | Should -Be 'Healthy'
+            $diags[0].IsHealthy | Should -BeTrue
+            $diags[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $diags[1].Health | Should -Be 'Warning'
+            $diags[1].IsHealthy | Should -BeFalse
+            $diags[2].ComputerName | Should -Be 'PC-REMOTO-03'
+            $diags[2].Health | Should -Be 'Critical'
+            $diags[2].IsHealthy | Should -BeFalse
+
+            $script:openedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 3
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=OK'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=OK'
+            $logLines[2] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'isola falhas Unreachable, allow-list e entrada vazia retornando SpoolDoctor.Diagnostic de falha no lote' {
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $targetHost = [string]$ArgumentList[0]
+                if ($targetHost -eq 'PC-REMOTO-02') {
+                    throw (New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'WinRM unreachable.')
+                }
+                $health = if ($targetHost -eq 'PC-REMOTO-03') { 'Warning' } else { 'Healthy' }
+                return [PSCustomObject]@{
+                    PSTypeName          = 'Deserialized.SpoolDoctor.Diagnostic'
+                    ComputerName        = $targetHost
+                    ServiceStatus       = 'Running'
+                    PrinterCount        = 1
+                    UnhealthyPrinters   = @()
+                    JobCount            = 0
+                    StuckJobs           = @()
+                    SpoolFileCount      = 0
+                    HasOrphanSpoolFiles = $false
+                    Health              = $health
+                    IsHealthy           = ($health -eq 'Healthy')
+                    Issues              = @()
+                    Recommendation      = 'OK'
+                    Timestamp           = Get-Date
+                }
+            }
+
+            $diags = @(Test-Spooler -ComputerName @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-INTRUSO', '', 'PC-REMOTO-03') -AllowedComputersPath $script:batchAllowListPath -LogPath $script:logPath)
+
+            $diags.Count | Should -Be 5
+            foreach ($diag in $diags) {
+                $diag.PSObject.TypeNames | Should -Contain 'SpoolDoctor.Diagnostic'
+            }
+
+            $diags[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $diags[0].Health | Should -Be 'Healthy'
+            $diags[0].IsHealthy | Should -BeTrue
+
+            $diags[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $diags[1].Health | Should -Be 'Unreachable'
+            $diags[1].IsHealthy | Should -BeFalse
+            $diags[1].ServiceStatus | Should -Be 'Unknown'
+            ($null -eq $diags[1].PrinterCount) | Should -BeTrue
+            ($null -eq $diags[1].JobCount) | Should -BeTrue
+            ($null -eq $diags[1].SpoolFileCount) | Should -BeTrue
+            $diags[1].Issues.Count | Should -BeGreaterThan 0
+            $diags[1].Recommendation | Should -Match 'WinRM|rede'
+
+            $diags[2].ComputerName | Should -Be 'PC-INTRUSO'
+            $diags[2].Health | Should -Be 'Failed'
+            $diags[2].IsHealthy | Should -BeFalse
+            ($null -eq $diags[2].PrinterCount) | Should -BeTrue
+            ($null -eq $diags[2].JobCount) | Should -BeTrue
+            ($diags[2].Issues -join ' ') | Should -Match 'allow-list'
+
+            $diags[3].ComputerName | Should -Be '(inválido)'
+            $diags[3].Health | Should -Be 'Failed'
+            $diags[3].IsHealthy | Should -BeFalse
+
+            $diags[4].ComputerName | Should -Be 'PC-REMOTO-03'
+            $diags[4].Health | Should -Be 'Warning'
+            $diags[4].IsHealthy | Should -BeFalse
+
+            $script:openedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 5
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=OK'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=Unreachable'
+            $logLines[2] | Should -Match 'Computer=PC-INTRUSO.*Outcome=Failed'
+            $logLines[3] | Should -Match 'Computer=\(inválido\).*Outcome=Failed'
+            $logLines[4] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'suporta lote misto, deduplicação, colapso de duplicata para 1 alvo falhando e @() vazio sob StrictMode' {
+            $mixedDiags = @(& {
+                Set-StrictMode -Version Latest
+                Test-Spooler -ComputerName @('localhost', $env:COMPUTERNAME, 'pc-remoto-01', 'PC-REMOTO-01') -AllowedComputersPath $script:batchAllowListPath -LogPath $script:logPath
+            })
+
+            $mixedDiags.Count | Should -Be 2
+            $mixedDiags[0].ComputerName | Should -Be $env:COMPUTERNAME
+            $mixedDiags[0].Health | Should -Be 'Healthy'
+            $mixedDiags[1].ComputerName | Should -Be 'PC-REMOTO-01'
+            $mixedDiags[1].Health | Should -Be 'Healthy'
+            Should -Invoke Get-SpoolerServiceStatus -ModuleName SpoolDoctor -Times 1 -Exactly
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+
+            $collapseLog = Join-Path -Path 'TestDrive:\' -ChildPath ("test-spooler-collapse-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                throw (New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'WinRM unreachable.')
+            }
+
+            {
+                Set-StrictMode -Version Latest
+                Test-Spooler -ComputerName @('PC-REMOTO-01', 'pc-remoto-01') -AllowedComputersPath $script:batchAllowListPath -LogPath $collapseLog
+            } | Should -Throw '*PC-REMOTO-01*'
+
+            $collapseLogs = @(Get-Content -LiteralPath $collapseLog -Encoding UTF8)
+            $collapseLogs.Count | Should -Be 1
+            $collapseLogs[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=Unreachable'
+
+            $emptyLog = Join-Path -Path 'TestDrive:\' -ChildPath ("test-spooler-empty-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            {
+                Set-StrictMode -Version Latest
+                Test-Spooler -ComputerName @() -AllowedComputersPath $script:batchAllowListPath -LogPath $emptyLog
+            } | Should -Throw
+
+            $emptyLogs = @(Get-Content -LiteralPath $emptyLog -Encoding UTF8)
+            $emptyLogs.Count | Should -Be 1
+            $emptyLogs[0] | Should -Match 'Computer=\(inválido\).*Outcome=Failed'
+        }
+    }
 }
