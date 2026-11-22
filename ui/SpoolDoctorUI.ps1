@@ -138,6 +138,42 @@ function Format-SpoolerActionResult {
     return ('[{0}] [{1}] ({2}) {3}' -f $timestampText, $outcomeText, $actionText, $messageText)
 }
 
+function Format-SpoolerDiagnostic {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        $Diagnostic
+    )
+
+    $timestampRaw = Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'Timestamp'
+    $timestampValue = if ($timestampRaw -is [datetime]) { [datetime]$timestampRaw } else { Get-Date }
+    $timestampText = $timestampValue.ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+
+    $computerText = [string](Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'ComputerName' -DefaultValue '-')
+    $healthText = [string](Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'Health' -DefaultValue 'Unknown')
+    $serviceText = [string](Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'ServiceStatus' -DefaultValue 'Unknown')
+    $printerCount = Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'PrinterCount' -DefaultValue 0
+    $jobCount = Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'JobCount' -DefaultValue 0
+    $stuckJobs = @(Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'StuckJobs' -DefaultValue @())
+    $spoolFileCount = Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'SpoolFileCount'
+    $spoolFileText = if ($null -eq $spoolFileCount) { 'sem permissão/indisponível' } else { [string]$spoolFileCount }
+    $recommendationText = [string](Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'Recommendation' -DefaultValue '')
+    $issues = @(Get-SpoolDoctorPropertyValue -InputObject $Diagnostic -PropertyName 'Issues' -DefaultValue @() | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+    $lines = New-Object -TypeName 'System.Collections.Generic.List[string]'
+    $lines.Add("[$timestampText] [$healthText] Diagnóstico em '$computerText' — Serviço: $serviceText | Impressoras: $printerCount | Jobs: $jobCount | Travados: $($stuckJobs.Count) | Arquivos PRINTERS: $spoolFileText")
+    if (-not [string]::IsNullOrWhiteSpace($recommendationText)) {
+        $lines.Add("Recomendação: $recommendationText")
+    }
+    foreach ($issue in $issues) {
+        $lines.Add("- $issue")
+    }
+
+    return ($lines -join "`r`n")
+}
+
 function Confirm-SpoolDoctorAction {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -205,12 +241,14 @@ function Sync-SpoolDoctorBusyState {
 
     if ($IsBusy) {
         $ui.RefreshButton.Enabled = $false
+        $ui.DiagnoseButton.Enabled = $false
         $ui.CancelButton.Enabled = $false
         $ui.ResetButton.Enabled = $false
         $Form.UseWaitCursor = $true
     }
     else {
         $ui.RefreshButton.Enabled = $true
+        $ui.DiagnoseButton.Enabled = $true
         $ui.ResetButton.Enabled = $true
         Sync-SpoolDoctorSelectionState -Form $Form
         $Form.UseWaitCursor = $false
@@ -483,6 +521,39 @@ function Invoke-SpoolDoctorReset {
     }
 }
 
+function Invoke-SpoolDoctorDiagnose {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [System.Windows.Forms.Form]$Form
+    )
+
+    $ui = $Form.Tag
+    Sync-SpoolDoctorBusyState -Form $Form -IsBusy $true
+
+    try {
+        $diagnoseParams = @{
+            ErrorAction = 'Stop'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ui.LogPath)) {
+            $diagnoseParams['LogPath'] = $ui.LogPath
+        }
+
+        $diagnostic = Test-Spooler @diagnoseParams
+        if ($null -ne $diagnostic) {
+            Write-SpoolDoctorStatusText -Form $Form -Text (Format-SpoolerDiagnostic -Diagnostic $diagnostic)
+        }
+    }
+    catch {
+        $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] [ERRO] Falha ao executar diagnóstico: $($_.Exception.Message)"
+    }
+    finally {
+        Sync-SpoolDoctorBusyState -Form $Form -IsBusy $false
+    }
+}
+
 function Initialize-SpoolDoctorForm {
     [CmdletBinding()]
     [OutputType([System.Windows.Forms.Form])]
@@ -501,7 +572,7 @@ function Initialize-SpoolDoctorForm {
 
     $form = New-Object -TypeName System.Windows.Forms.Form
     $form.Text = 'SpoolDoctor - Fila de Impressão'
-    $form.Size = New-Object -TypeName System.Drawing.Size(920, 560)
+    $form.Size = New-Object -TypeName System.Drawing.Size(960, 560)
     $form.MinimumSize = New-Object -TypeName System.Drawing.Size(780, 480)
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.Font = New-Object -TypeName System.Drawing.Font('Segoe UI', 9)
@@ -589,6 +660,12 @@ function Initialize-SpoolDoctorForm {
     $backupCheckBox.AutoSize = $true
     $backupCheckBox.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 16, 4)
 
+    $diagnoseButton = New-Object -TypeName System.Windows.Forms.Button
+    $diagnoseButton.Text = 'Diagnosticar'
+    $diagnoseButton.AutoSize = $true
+    $diagnoseButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
+    $diagnoseButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 10, 4)
+
     $cancelButton = New-Object -TypeName System.Windows.Forms.Button
     $cancelButton.Text = 'Cancelar job selecionado'
     $cancelButton.AutoSize = $true
@@ -602,7 +679,7 @@ function Initialize-SpoolDoctorForm {
     $resetButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
     $resetButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 0, 4)
 
-    $actionPanel.Controls.AddRange(@($whatIfCheckBox, $backupCheckBox, $cancelButton, $resetButton))
+    $actionPanel.Controls.AddRange(@($whatIfCheckBox, $backupCheckBox, $diagnoseButton, $cancelButton, $resetButton))
 
     $statusGroup = New-Object -TypeName System.Windows.Forms.GroupBox
     $statusGroup.Text = 'Status e retorno das ações'
@@ -635,6 +712,7 @@ function Initialize-SpoolDoctorForm {
         Grid           = $grid
         WhatIfCheckBox = $whatIfCheckBox
         BackupCheckBox = $backupCheckBox
+        DiagnoseButton = $diagnoseButton
         CancelButton   = $cancelButton
         ResetButton    = $resetButton
         StatusTextBox  = $statusTextBox
@@ -644,6 +722,12 @@ function Initialize-SpoolDoctorForm {
         $owner = $this.FindForm()
         if ($null -ne $owner) {
             Invoke-SpoolDoctorRefresh -Form $owner
+        }
+    })
+    $diagnoseButton.Add_Click({
+        $owner = $this.FindForm()
+        if ($null -ne $owner) {
+            Invoke-SpoolDoctorDiagnose -Form $owner
         }
     })
     $cancelButton.Add_Click({
