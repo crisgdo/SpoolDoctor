@@ -1,4 +1,4 @@
-Describe 'SpoolDoctor - Interface WinForms e launcher (Operação 4)' {
+﻿Describe 'SpoolDoctor - Interface WinForms e launcher (Operação 4)' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $script:uiScriptPath = Join-Path -Path $repoRoot -ChildPath 'ui\SpoolDoctorUI.ps1'

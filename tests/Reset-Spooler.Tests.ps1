@@ -1,4 +1,4 @@
-Describe 'SpoolDoctor - Reset-Spooler' {
+﻿Describe 'SpoolDoctor - Reset-Spooler' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'
@@ -28,6 +28,12 @@ Describe 'SpoolDoctor - Reset-Spooler' {
         Mock Get-SpoolFile -ModuleName SpoolDoctor { return @() }
         Mock Copy-SpoolFile -ModuleName SpoolDoctor {}
         Mock Remove-SpoolFile -ModuleName SpoolDoctor {}
+        Mock Remove-OldSpoolBackup -ModuleName SpoolDoctor {
+            return [PSCustomObject]@{
+                RemovedCount = 0
+                Warnings     = @()
+            }
+        }
     }
 
     It 'declara SupportsShouldProcess e ConfirmImpact = High' {
@@ -58,6 +64,7 @@ Describe 'SpoolDoctor - Reset-Spooler' {
         Should -Invoke Remove-SpoolFile -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Start-SpoolerService -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Get-SpoolerServiceStatus -ModuleName SpoolDoctor -Times 0 -Exactly
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
 
         Test-Path -LiteralPath $script:logPath -PathType Leaf | Should -BeTrue
         $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
@@ -79,6 +86,7 @@ Describe 'SpoolDoctor - Reset-Spooler' {
         Should -Invoke Remove-SpoolFile -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Start-SpoolerService -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Get-SpoolerServiceStatus -ModuleName SpoolDoctor -Times 0 -Exactly
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
         Test-Path -LiteralPath $script:backupPath | Should -BeFalse
 
         Test-Path -LiteralPath $script:logPath -PathType Leaf | Should -BeTrue
@@ -103,6 +111,7 @@ Import-Module -Name '$manifestPath' -Force
     function script:Remove-SpoolFile { [CmdletBinding(SupportsShouldProcess)] param([string]`$Path) throw 'Não deveria chamar Remove-SpoolFile.' }
     function script:Start-SpoolerService { [CmdletBinding(SupportsShouldProcess)] param() throw 'Não deveria chamar Start-SpoolerService.' }
     function script:Get-SpoolerServiceStatus { throw 'Não deveria chamar Get-SpoolerServiceStatus.' }
+    function script:Remove-OldSpoolBackup { [CmdletBinding(SupportsShouldProcess)] param([string]`$BackupRoot, [int]`$RetentionDays = 7) throw 'Não deveria chamar Remove-OldSpoolBackup.' }
 }
 Reset-Spooler -LogPath '$childLogPath' | ConvertTo-Json -Compress
 "@
@@ -331,6 +340,7 @@ Reset-Spooler -LogPath '$childLogPath' | ConvertTo-Json -Compress
         Should -Invoke Remove-SpoolFile -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Start-SpoolerService -ModuleName SpoolDoctor -Times 1 -Exactly
         Should -Invoke Get-SpoolerServiceStatus -ModuleName SpoolDoctor -Times 1 -Exactly
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
         Test-Path -LiteralPath $script:backupPath | Should -BeFalse
 
         $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
@@ -379,6 +389,7 @@ Reset-Spooler -LogPath '$childLogPath' | ConvertTo-Json -Compress
 
         $script:capturedBackupDestinations.Count | Should -Be 2
         ($script:capturedBackupDestinations | Select-Object -Unique) | Should -Be @($script:backupPath)
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
 
         $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
         $logLines.Count | Should -Be 1
@@ -409,6 +420,7 @@ Reset-Spooler -LogPath '$childLogPath' | ConvertTo-Json -Compress
 
         Should -Invoke Copy-SpoolFile -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Remove-SpoolFile -ModuleName SpoolDoctor -Times 2 -Exactly
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
 
         $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
         $logLines.Count | Should -Be 1
@@ -456,9 +468,83 @@ Reset-Spooler -LogPath '$childLogPath' | ConvertTo-Json -Compress
         Should -Invoke Copy-SpoolFile -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Remove-SpoolFile -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Start-SpoolerService -ModuleName SpoolDoctor -Times 0 -Exactly
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
 
         $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
         $logLines.Count | Should -Be 1
         $logLines[0] | Should -Match 'Outcome=Failed'
+    }
+
+    It 'com backup padrão ativo chama Remove-OldSpoolBackup com RetentionDays 7 e registra contagem removida' {
+        $script:capturedCleanupRoot = $null
+        $script:capturedCleanupDays = $null
+
+        Mock Remove-OldSpoolBackup -ModuleName SpoolDoctor {
+            param([string]$BackupRoot, [int]$RetentionDays)
+            $script:capturedCleanupRoot = $BackupRoot
+            $script:capturedCleanupDays = $RetentionDays
+            return [PSCustomObject]@{
+                RemovedCount = 2
+                Warnings     = @()
+            }
+        }
+
+        $result = Reset-Spooler -Confirm:$false -LogPath $script:logPath
+
+        $result.Outcome | Should -Be 'OK'
+        $result.Message | Should -Match 'Backups antigos removidos:\s*2'
+
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 1 -Exactly
+        $script:capturedCleanupDays | Should -Be 7
+        $script:capturedCleanupRoot | Should -Match 'SpoolDoctor\\backups$'
+
+        $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+        $logLines.Count | Should -Be 1
+        $logLines[0] | Should -Match 'Outcome=OK'
+        $logLines[0] | Should -Match 'Backups antigos removidos:\s*2'
+    }
+
+    It 'com -BackupRetentionDays 0 não chama Remove-OldSpoolBackup mesmo sem -BackupPath' {
+        $result = Reset-Spooler -Confirm:$false -BackupRetentionDays 0 -LogPath $script:logPath
+
+        $result.Outcome | Should -Be 'OK'
+        Should -Invoke Remove-OldSpoolBackup -ModuleName SpoolDoctor -Times 0 -Exactly
+    }
+
+    It 'registra aviso na mensagem e no log sem alterar Outcome para Failed quando limpeza de backup antigo retorna aviso ou falha' {
+        Mock Remove-OldSpoolBackup -ModuleName SpoolDoctor {
+            return [PSCustomObject]@{
+                RemovedCount = 1
+                Warnings     = @("Não foi possível remover '20260101-010101': em uso.")
+            }
+        }
+
+        $resultWarning = Reset-Spooler -Confirm:$false -LogPath $script:logPath
+
+        $resultWarning.Outcome | Should -Be 'OK'
+        $resultWarning.Message | Should -Match 'Backups antigos removidos:\s*1'
+        $resultWarning.Message | Should -Match 'Aviso na limpeza de backups antigos'
+        $resultWarning.Message | Should -Match 'em uso'
+
+        $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+        $logLines.Count | Should -Be 1
+        $logLines[0] | Should -Match 'Outcome=OK'
+        $logLines[0] | Should -Match 'Aviso na limpeza de backups antigos'
+
+        $errorCleanupLogPath = Join-Path -Path 'TestDrive:\' -ChildPath ("reset-cleanup-err-{0}.log" -f [guid]::NewGuid().ToString('N'))
+        Mock Remove-OldSpoolBackup -ModuleName SpoolDoctor {
+            throw 'Falha inesperada na limpeza.'
+        }
+
+        $resultError = Reset-Spooler -Confirm:$false -LogPath $errorCleanupLogPath
+
+        $resultError.Outcome | Should -Be 'OK'
+        $resultError.Message | Should -Match 'Aviso na limpeza de backups antigos'
+        $resultError.Message | Should -Match 'Falha inesperada na limpeza\.'
+
+        $errLogLines = @(Get-Content -LiteralPath $errorCleanupLogPath -Encoding UTF8)
+        $errLogLines.Count | Should -Be 1
+        $errLogLines[0] | Should -Match 'Outcome=OK'
+        $errLogLines[0] | Should -Match 'Falha inesperada na limpeza\.'
     }
 }

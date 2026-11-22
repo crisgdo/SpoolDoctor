@@ -1,4 +1,4 @@
-Describe 'SpoolDoctor - Backup seguro de arquivos do spooler (Copy-SpoolFile)' {
+﻿Describe 'SpoolDoctor - Backup seguro de arquivos do spooler (Copy-SpoolFile)' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'

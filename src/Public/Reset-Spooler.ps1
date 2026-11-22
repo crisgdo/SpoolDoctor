@@ -1,4 +1,4 @@
-function Reset-Spooler {
+﻿function Reset-Spooler {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     [OutputType([PSCustomObject])]
     param(
@@ -11,7 +11,11 @@ function Reset-Spooler {
 
         [Parameter()]
         [ValidateNotNullOrEmpty()]
-        [string]$BackupPath
+        [string]$BackupPath,
+
+        [Parameter()]
+        [ValidateRange(0, 365)]
+        [int]$BackupRetentionDays = 7
     )
 
     $computerName = if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
@@ -52,6 +56,7 @@ function Reset-Spooler {
             $startAttempted = $false
             $backedUpCount = 0
             $removedCount = 0
+            $defaultBackupRoot = $null
             $effectiveBackupDirectory = $null
             $failureMessage = $null
 
@@ -69,7 +74,8 @@ function Reset-Spooler {
                             throw 'A variável de ambiente ProgramData não está definida para gravar o backup.'
                         }
 
-                        $effectiveBackupDirectory = Join-Path -Path $programDataRoot -ChildPath ("SpoolDoctor\backups\{0}" -f $timestamp.ToString('yyyyMMdd-HHmmss'))
+                        $defaultBackupRoot = Join-Path -Path $programDataRoot -ChildPath 'SpoolDoctor\backups'
+                        $effectiveBackupDirectory = Join-Path -Path $defaultBackupRoot -ChildPath $timestamp.ToString('yyyyMMdd-HHmmss')
                     }
                 }
 
@@ -148,6 +154,29 @@ function Reset-Spooler {
                         }
                         else {
                             $message = "Spooler reiniciado com sucesso na máquina '$computerName'. Arquivos removidos: 0 (fila já vazia; nenhum backup necessário). Serviço em execução e fila vazia."
+                        }
+
+                        if (-not $SkipBackup -and $BackupRetentionDays -gt 0 -and -not [string]::IsNullOrWhiteSpace($defaultBackupRoot)) {
+                            try {
+                                $cleanupResult = Remove-OldSpoolBackup -BackupRoot $defaultBackupRoot -RetentionDays $BackupRetentionDays -Confirm:$false
+                                if ($null -ne $cleanupResult) {
+                                    $removedProp = $cleanupResult.PSObject.Properties['RemovedCount']
+                                    if ($null -ne $removedProp -and [int]$removedProp.Value -gt 0) {
+                                        $message = "$message Backups antigos removidos: $([int]$removedProp.Value)."
+                                    }
+
+                                    $warningsProp = $cleanupResult.PSObject.Properties['Warnings']
+                                    if ($null -ne $warningsProp -and $null -ne $warningsProp.Value) {
+                                        $cleanupWarnings = @($warningsProp.Value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                                        if ($cleanupWarnings.Count -gt 0) {
+                                            $message = "$message Aviso na limpeza de backups antigos: $($cleanupWarnings -join ' ')"
+                                        }
+                                    }
+                                }
+                            }
+                            catch {
+                                $message = "$message Aviso na limpeza de backups antigos: $($_.Exception.Message)"
+                            }
                         }
                     }
                 }

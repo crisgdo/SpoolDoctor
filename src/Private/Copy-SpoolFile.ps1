@@ -1,4 +1,4 @@
-function Copy-SpoolFile {
+﻿function Copy-SpoolFile {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)]
