@@ -1,4 +1,4 @@
-function Get-SpoolerJob {
+﻿function Get-SpoolerJob {
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param(

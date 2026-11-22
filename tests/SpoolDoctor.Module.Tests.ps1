@@ -1,4 +1,4 @@
-Describe 'SpoolDoctor - Manifesto e carregamento do módulo' {
+﻿Describe 'SpoolDoctor - Manifesto e carregamento do módulo' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'

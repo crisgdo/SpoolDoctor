@@ -1,4 +1,4 @@
-function Get-SpoolerJobRaw {
+﻿function Get-SpoolerJobRaw {
     [CmdletBinding()]
     [OutputType([object[]])]
     param(

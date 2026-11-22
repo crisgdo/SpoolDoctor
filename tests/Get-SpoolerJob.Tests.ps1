@@ -1,4 +1,4 @@
-Describe 'SpoolDoctor - Get-SpoolerJob' {
+﻿Describe 'SpoolDoctor - Get-SpoolerJob' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'

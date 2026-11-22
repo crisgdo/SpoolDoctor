@@ -1,4 +1,4 @@
-function Get-SpoolerPrinterRaw {
+﻿function Get-SpoolerPrinterRaw {
     [CmdletBinding()]
     [OutputType([object[]])]
     param()
