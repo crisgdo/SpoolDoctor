@@ -21,6 +21,9 @@ Quando a fila de impressão trava, o v0 resolve apagando tudo e reiniciando o sp
   - Caminho padrão: `%ProgramData%\SpoolDoctor\logs\spooldoctor.log` (criando o diretório automaticamente se não existir), em UTF-8, uma linha estruturada por evento.
   - Aceitar parâmetro opcional `-LogPath` para redirecionamento em testes (`TestDrive:\`) ou uso customizado.
 - **RF7.** Backup dos arquivos da fila antes de apagar (opcional, ligado por padrão).
+  - Caminho padrão: `%ProgramData%\SpoolDoctor\backups\<yyyyMMdd-HHmmss>` (criando o diretório automaticamente apenas quando houver arquivos a copiar).
+  - Aceitar parâmetros opcionais em `Reset-Spooler`: `-BackupPath` para redirecionamento em testes (`TestDrive:\`) ou destino customizado, e `-SkipBackup` para desabilitar o backup.
+  - Em caso de falha no backup, abortar a remoção dos arquivos, tentar reiniciar o serviço `Spooler` no `finally` e retornar `Outcome = 'Failed'`.
 - **RF8.** Elevação automática: exigir ou solicitar administrador, em vez de depender do usuário.
 - **RF9.** Diagnóstico: serviço do spooler ativo, jobs parados há mais de N minutos, impressora respondendo.
 - **RF10. Execução remota:** executar RF1, RF2, RF3 e RF9 em outra máquina via `Invoke-Command` (WinRM), com relatório por máquina.

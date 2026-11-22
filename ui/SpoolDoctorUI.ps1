@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter()]
     [switch]$NoShow,
@@ -418,6 +418,13 @@ function Invoke-SpoolDoctorReset {
 
     $ui = $Form.Tag
     $isWhatIf = [bool]$ui.WhatIfCheckBox.Checked
+    $shouldBackup = [bool]$ui.BackupCheckBox.Checked
+    $backupNotice = if ($shouldBackup) {
+        "`r`nBackup antes de apagar: SIM (arquivos .SPL e .SHD serão copiados antes da remoção)."
+    }
+    else {
+        "`r`nBackup antes de apagar: NÃO (-SkipBackup; arquivos serão removidos sem cópia prévia)."
+    }
     $whatIfNotice = if ($isWhatIf) {
         "`r`n`r`nMODO SIMULAÇÃO (-WhatIf) ATIVO: nenhuma alteração real será feita."
     }
@@ -426,8 +433,9 @@ function Invoke-SpoolDoctorReset {
     }
 
     $confirmMessage = (
-        "ATENÇÃO: esta ação irá parar o serviço Spooler, apagar todos os arquivos .SPL e .SHD da fila e reiniciar o serviço na máquina '$($ui.ComputerName)'.`r`n`r`n" +
-        "Deseja continuar?" +
+        "ATENÇÃO: esta ação irá parar o serviço Spooler, apagar todos os arquivos .SPL e .SHD da fila e reiniciar o serviço na máquina '$($ui.ComputerName)'.`r`n" +
+        $backupNotice +
+        "`r`n`r`nDeseja continuar?" +
         $whatIfNotice
     )
 
@@ -446,6 +454,9 @@ function Invoke-SpoolDoctorReset {
         }
         if (-not [string]::IsNullOrWhiteSpace($ui.LogPath)) {
             $actionParams['LogPath'] = $ui.LogPath
+        }
+        if (-not $shouldBackup) {
+            $actionParams['SkipBackup'] = $true
         }
         if ($isWhatIf) {
             $actionParams['WhatIf'] = $true
@@ -564,12 +575,19 @@ function Initialize-SpoolDoctorForm {
     $actionPanel = New-Object -TypeName System.Windows.Forms.FlowLayoutPanel
     $actionPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
     $actionPanel.AutoSize = $true
+    $actionPanel.WrapContents = $true
     $actionPanel.Padding = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 0, 6)
 
     $whatIfCheckBox = New-Object -TypeName System.Windows.Forms.CheckBox
     $whatIfCheckBox.Text = 'Modo simulação (-WhatIf)'
     $whatIfCheckBox.AutoSize = $true
     $whatIfCheckBox.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 16, 4)
+
+    $backupCheckBox = New-Object -TypeName System.Windows.Forms.CheckBox
+    $backupCheckBox.Text = 'Fazer backup antes de resetar'
+    $backupCheckBox.Checked = $true
+    $backupCheckBox.AutoSize = $true
+    $backupCheckBox.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 6, 16, 4)
 
     $cancelButton = New-Object -TypeName System.Windows.Forms.Button
     $cancelButton.Text = 'Cancelar job selecionado'
@@ -584,7 +602,7 @@ function Initialize-SpoolDoctorForm {
     $resetButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
     $resetButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 0, 4)
 
-    $actionPanel.Controls.AddRange(@($whatIfCheckBox, $cancelButton, $resetButton))
+    $actionPanel.Controls.AddRange(@($whatIfCheckBox, $backupCheckBox, $cancelButton, $resetButton))
 
     $statusGroup = New-Object -TypeName System.Windows.Forms.GroupBox
     $statusGroup.Text = 'Status e retorno das ações'
@@ -609,16 +627,17 @@ function Initialize-SpoolDoctorForm {
 
     $resolvedLogPath = if ($PSBoundParameters.ContainsKey('LogPath')) { $LogPath } else { $null }
     $form.Tag = @{
-        ComputerName  = $computerName
-        LogPath       = $resolvedLogPath
-        ComputerLabel = $computerLabel
-        FilterTextBox = $filterTextBox
-        RefreshButton = $refreshButton
-        Grid          = $grid
+        ComputerName   = $computerName
+        LogPath        = $resolvedLogPath
+        ComputerLabel  = $computerLabel
+        FilterTextBox  = $filterTextBox
+        RefreshButton  = $refreshButton
+        Grid           = $grid
         WhatIfCheckBox = $whatIfCheckBox
-        CancelButton  = $cancelButton
-        ResetButton   = $resetButton
-        StatusTextBox = $statusTextBox
+        BackupCheckBox = $backupCheckBox
+        CancelButton   = $cancelButton
+        ResetButton    = $resetButton
+        StatusTextBox  = $statusTextBox
     }
 
     $refreshButton.Add_Click({

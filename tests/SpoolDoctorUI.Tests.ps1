@@ -1,4 +1,4 @@
-﻿Describe 'SpoolDoctor - Interface WinForms e launcher (Operação 4)' {
+Describe 'SpoolDoctor - Interface WinForms e launcher (Operação 4)' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $script:uiScriptPath = Join-Path -Path $repoRoot -ChildPath 'ui\SpoolDoctorUI.ps1'
@@ -107,6 +107,7 @@
             'Stop-Service',
             'Start-Service',
             'Remove-Item',
+            'Copy-Item',
             'Get-PrintJob',
             'Remove-PrintJob',
             'Get-Printer',
@@ -156,6 +157,7 @@
             $ui.RefreshButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.Grid | Should -BeOfType [System.Windows.Forms.DataGridView]
             $ui.WhatIfCheckBox | Should -BeOfType [System.Windows.Forms.CheckBox]
+            $ui.BackupCheckBox | Should -BeOfType [System.Windows.Forms.CheckBox]
             $ui.CancelButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.ResetButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.StatusTextBox | Should -BeOfType [System.Windows.Forms.TextBox]
@@ -174,6 +176,8 @@
             $ui.RefreshButton.Enabled | Should -BeTrue
             $ui.ResetButton.Enabled | Should -BeTrue
             $ui.WhatIfCheckBox.Checked | Should -BeFalse
+            $ui.BackupCheckBox.Checked | Should -BeTrue
+            $ui.BackupCheckBox.Text | Should -Match 'backup'
             $form.UseWaitCursor | Should -BeFalse
         }
         finally {
@@ -545,11 +549,16 @@
     }
 
     It 'chama Reset-Spooler -Confirm:$false quando confirmação é aceita sem simulação' {
+        $script:capturedResetRealConfirmMsg = $null
         $script:capturedResetRealArgs = $null
         $script:capturedResetRealConfirmPref = $null
         $script:capturedResetRealWhatIf = $false
 
-        Mock Confirm-SpoolDoctorAction { return $true }
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedResetRealConfirmMsg = $Message
+            return $true
+        }
         Mock Reset-Spooler {
             param([string]$LogPath)
             $script:capturedResetRealArgs = @{} + $PSBoundParameters
@@ -569,15 +578,62 @@
         try {
             $ui = $form.Tag
             $ui.WhatIfCheckBox.Checked = $false
+            $ui.BackupCheckBox.Checked = $true
 
             Invoke-SpoolDoctorReset -Form $form
 
             Should -Invoke Reset-Spooler -Times 1 -Exactly
+            $script:capturedResetRealConfirmMsg | Should -Match 'SIM'
             $script:capturedResetRealWhatIf | Should -BeFalse
             $script:capturedResetRealConfirmPref | Should -Be 'None'
+            $script:capturedResetRealArgs.ContainsKey('SkipBackup') | Should -BeFalse
             $script:capturedResetRealArgs['LogPath'] | Should -Be $script:logPath
             $ui.StatusTextBox.Text | Should -Match '\[OK\]'
             $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeTrue
+            $form.UseWaitCursor | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'chama Reset-Spooler com -SkipBackup quando BackupCheckBox está desmarcado' {
+        $script:capturedSkipBackupConfirmMsg = $null
+        $script:capturedSkipBackupArgs = $null
+
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedSkipBackupConfirmMsg = $Message
+            return $true
+        }
+        Mock Reset-Spooler {
+            param([string]$LogPath, [switch]$SkipBackup)
+            $script:capturedSkipBackupArgs = @{} + $PSBoundParameters
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = $env:COMPUTERNAME
+                Action       = 'Reset-Spooler'
+                Outcome      = 'OK'
+                Message      = 'Spooler reiniciado sem backup (-SkipBackup).'
+                Timestamp    = Get-Date
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.WhatIfCheckBox.Checked = $false
+            $ui.BackupCheckBox.Checked = $false
+
+            Invoke-SpoolDoctorReset -Form $form
+
+            Should -Invoke Reset-Spooler -Times 1 -Exactly
+            $script:capturedSkipBackupConfirmMsg | Should -Match 'SkipBackup|NÃO'
+            $script:capturedSkipBackupArgs.ContainsKey('SkipBackup') | Should -BeTrue
+            ([bool]$script:capturedSkipBackupArgs['SkipBackup']) | Should -BeTrue
+            $ui.StatusTextBox.Text | Should -Match '\[OK\]'
             $ui.RefreshButton.Enabled | Should -BeTrue
             $ui.ResetButton.Enabled | Should -BeTrue
             $form.UseWaitCursor | Should -BeFalse

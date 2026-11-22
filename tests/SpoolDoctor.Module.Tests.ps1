@@ -1,4 +1,4 @@
-﻿Describe 'SpoolDoctor - Manifesto e carregamento do módulo' {
+Describe 'SpoolDoctor - Manifesto e carregamento do módulo' {
     BeforeAll {
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $manifestPath = Join-Path -Path $repoRoot -ChildPath 'src\SpoolDoctor.psd1'
@@ -42,6 +42,7 @@
         $privateFunctions | Should -Contain 'Get-SpoolerPrinterRaw'
         $privateFunctions | Should -Contain 'Get-SpoolerJobRaw'
         $privateFunctions | Should -Contain 'Remove-SpoolerJobRaw'
+        $privateFunctions | Should -Contain 'Copy-SpoolFile'
 
         foreach ($privateFunction in $privateFunctions) {
             $module.ExportedFunctions.Keys | Should -Not -Contain $privateFunction
