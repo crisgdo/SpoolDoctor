@@ -29,9 +29,10 @@
 
         $module = Get-Module -Name 'SpoolDoctor'
         $module | Should -Not -BeNullOrEmpty
-        $module.ExportedFunctions.Count | Should -Be 2
+        $module.ExportedFunctions.Count | Should -Be 3
         $module.ExportedFunctions.Keys | Should -Contain 'Reset-Spooler'
         $module.ExportedFunctions.Keys | Should -Contain 'Get-SpoolerJob'
+        $module.ExportedFunctions.Keys | Should -Contain 'Remove-SpoolerJob'
 
         $privateFunctions = @(
             Get-ChildItem -Path $privateFolderPath -Filter '*.ps1' -File -ErrorAction Stop |
@@ -40,6 +41,7 @@
         $privateFunctions.Count | Should -BeGreaterThan 0
         $privateFunctions | Should -Contain 'Get-SpoolerPrinterRaw'
         $privateFunctions | Should -Contain 'Get-SpoolerJobRaw'
+        $privateFunctions | Should -Contain 'Remove-SpoolerJobRaw'
 
         foreach ($privateFunction in $privateFunctions) {
             $module.ExportedFunctions.Keys | Should -Not -Contain $privateFunction
