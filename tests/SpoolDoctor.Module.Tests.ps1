@@ -30,7 +30,8 @@
 
         $module = Get-Module -Name 'SpoolDoctor'
         $module | Should -Not -BeNullOrEmpty
-        $module.ExportedFunctions.Count | Should -Be 4
+        $module.ExportedFunctions.Count | Should -Be 5
+        $module.ExportedFunctions.Keys | Should -Contain 'Get-SpoolerAllowedComputer'
         $module.ExportedFunctions.Keys | Should -Contain 'Reset-Spooler'
         $module.ExportedFunctions.Keys | Should -Contain 'Get-SpoolerJob'
         $module.ExportedFunctions.Keys | Should -Contain 'Remove-SpoolerJob'

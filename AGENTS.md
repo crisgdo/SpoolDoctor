@@ -26,7 +26,7 @@ Ferramenta em PowerShell para diagnosticar e limpar a fila de impressão do Wind
 
 ## Estrutura
 
-- `src/Public`: funções exportadas (`Get-SpoolerJob`, `Remove-SpoolerJob`, `Reset-Spooler`, `Test-Spooler`).
+- `src/Public`: funções exportadas (`Get-SpoolerAllowedComputer`, `Get-SpoolerJob`, `Remove-SpoolerJob`, `Reset-Spooler`, `Test-Spooler`).
 - `src/Private`: wrappers finos do sistema, log, backup, validação de caminho. **Só aqui se toca o sistema.** Wrappers têm nome próprio (ex.: `Get-SpoolerJobRaw`), nunca o nome de um cmdlet nativo.
 - `src/Remote`: despacho remoto e leitura da allow-list.
 - `ui/`: interface WinForms, camada fina sem lógica de negócio.
