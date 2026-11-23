@@ -1,6 +1,6 @@
 ﻿@{
     RootModule        = 'SpoolDoctor.psm1'
-    ModuleVersion     = '0.1.0'
+    ModuleVersion     = '1.0.0'
     GUID              = 'a8c4e2b1-7d3f-4c9a-9e52-1b6f0d8a3c4e'
     Author            = 'SpoolDoctor'
     CompanyName       = 'SpoolDoctor'
