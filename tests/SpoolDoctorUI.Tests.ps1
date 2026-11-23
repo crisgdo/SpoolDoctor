@@ -42,6 +42,9 @@
     BeforeEach {
         $script:logPath = Join-Path -Path 'TestDrive:\' -ChildPath ("ui-{0}.log" -f [guid]::NewGuid().ToString('N'))
 
+        if (Get-Command -Name 'Get-SpoolerAllowedComputer' -ErrorAction SilentlyContinue) {
+            Mock Get-SpoolerAllowedComputer { return @() }
+        }
         if (Get-Command -Name 'Get-SpoolerJob' -ErrorAction SilentlyContinue) {
             Mock Get-SpoolerJob { return @() }
         }
@@ -71,6 +74,9 @@
         }
         if (Get-Command -Name 'Confirm-SpoolDoctorAction' -ErrorAction SilentlyContinue) {
             Mock Confirm-SpoolDoctorAction { return $false }
+        }
+        if (Get-Command -Name 'Request-SpoolDoctorCredential' -ErrorAction SilentlyContinue) {
+            Mock Request-SpoolDoctorCredential { return $null }
         }
         if (Get-Command -Name 'Test-SpoolDoctorElevated' -ErrorAction SilentlyContinue) {
             Mock Test-SpoolDoctorElevated { return $true }
@@ -164,12 +170,17 @@
             'Remove-PrintJob',
             'Get-Printer',
             'Get-Service',
+            'Invoke-Command',
+            'New-PSSession',
+            'Remove-PSSession',
+            'Get-Content',
             'Write-Host'
         )
         foreach ($forbidden in $forbiddenCommands) {
             $commandNames | Should -Not -Contain $forbidden
         }
 
+        $commandNames | Should -Contain 'Get-SpoolerAllowedComputer'
         $commandNames | Should -Contain 'Get-SpoolerJob'
         $commandNames | Should -Contain 'Remove-SpoolerJob'
         $commandNames | Should -Contain 'Reset-Spooler'
@@ -205,7 +216,16 @@
             $ui = $form.Tag
             $ui | Should -Not -BeNullOrEmpty
 
-            $ui.ComputerLabel.Text | Should -Match ([regex]::Escape($env:COMPUTERNAME))
+            $ui.TargetLabel | Should -BeOfType [System.Windows.Forms.Label]
+            $ui.TargetLabel.Text | Should -Match 'Máquina'
+            $ui.TargetComboBox | Should -BeOfType [System.Windows.Forms.ComboBox]
+            $ui.TargetComboBox.DropDownStyle | Should -Be ([System.Windows.Forms.ComboBoxStyle]::DropDownList)
+            $ui.TargetComboBox.SelectedIndex | Should -Be 0
+            [string]$ui.TargetComboBox.SelectedItem | Should -Match ([regex]::Escape($env:COMPUTERNAME))
+            [string]$ui.TargetComboBox.SelectedItem | Should -Match 'Local'
+            $ui.CredentialCheckBox | Should -BeOfType [System.Windows.Forms.CheckBox]
+            $ui.CredentialCheckBox.Enabled | Should -BeFalse
+            $ui.CredentialCheckBox.Checked | Should -BeFalse
             $form.Text | Should -Match 'Administrador'
             $ui.PrivilegeLabel | Should -BeOfType [System.Windows.Forms.Label]
             $ui.PrivilegeLabel.Text | Should -Match 'Administrador'
@@ -226,7 +246,8 @@
             $ui.Grid.SelectionMode | Should -Be ([System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect)
             $ui.Grid.AllowUserToAddRows | Should -BeFalse
             $ui.Grid.AllowUserToDeleteRows | Should -BeFalse
-            $ui.Grid.Columns.Count | Should -Be 7
+            $ui.Grid.Columns.Count | Should -Be 8
+            $ui.Grid.Columns['ComputerName'].HeaderText | Should -Be 'Máquina'
 
             $ui.StatusTextBox.ReadOnly | Should -BeTrue
             $ui.StatusTextBox.Multiline | Should -BeTrue
@@ -292,6 +313,7 @@
             $script:capturedRefreshLogPath | Should -Be $script:logPath
 
             $ui.Grid.Rows.Count | Should -Be 2
+            $ui.Grid.Rows[0].Cells['ComputerName'].Value | Should -Be $env:COMPUTERNAME
             $ui.Grid.Rows[0].Cells['Id'].Value | Should -Be 101
             $ui.Grid.Rows[0].Cells['PrinterName'].Value | Should -Be 'HP LaserJet'
             $ui.Grid.Rows[0].Cells['Document'].Value | Should -Be 'Relatorio.pdf'
@@ -300,6 +322,7 @@
             $ui.Grid.Rows[0].Cells['Age'].Value | Should -Be '15m 05s'
             $ui.Grid.Rows[0].Cells['SubmittedAt'].Value | Should -Be '22/11/2026 15:30:00'
 
+            $ui.Grid.Rows[1].Cells['ComputerName'].Value | Should -Be $env:COMPUTERNAME
             $ui.Grid.Rows[1].Cells['Id'].Value | Should -Be 102
             $ui.Grid.Rows[1].Cells['Document'].Value | Should -Be '-'
             $ui.Grid.Rows[1].Cells['Size'].Value | Should -Be '-'
@@ -790,6 +813,7 @@
         $uiCommand.Parameters.Keys | Should -Contain 'NoElevate'
         $uiCommand.Parameters.Keys | Should -Contain 'ElevationAttempted'
         $uiCommand.Parameters.Keys | Should -Contain 'LogPath'
+        $uiCommand.Parameters.Keys | Should -Contain 'AllowedComputersPath'
 
         $tokens = $null
         $parseErrors = $null
@@ -1169,5 +1193,737 @@
         finally {
             $formAlreadyAdmin.Dispose()
         }
+    }
+
+    It 'popula o seletor de máquinas com allow-list vazia, 1 máquina, múltiplas máquinas e trata erro ao carregar allow-list' {
+        $customAllowPath = Join-Path -Path 'TestDrive:\' -ChildPath 'ui-allowed.txt'
+
+        # Caso 1: allow-list vazia
+        $formEmpty = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $uiEmpty = $formEmpty.Tag
+            $uiEmpty.TargetComboBox.Items.Count | Should -Be 1
+            $uiEmpty.TargetComboBox.SelectedIndex | Should -Be 0
+            [string]$uiEmpty.TargetComboBox.Items[0] | Should -Be ("Local ({0})" -f $env:COMPUTERNAME)
+            $uiEmpty.StatusTextBox.Text | Should -BeNullOrEmpty
+        }
+        finally {
+            $formEmpty.Dispose()
+        }
+
+        # Caso 2: 1 máquina (sem opção de lote)
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName    = 'SpoolDoctor.AllowedComputer'
+                    ComputerName  = 'PC-FIN-01'
+                    IsPrintServer = $false
+                }
+            )
+        }
+        $formSingle = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $uiSingle = $formSingle.Tag
+            $uiSingle.TargetComboBox.Items.Count | Should -Be 2
+            [string]$uiSingle.TargetComboBox.Items[1] | Should -Be 'PC-FIN-01'
+            @($uiSingle.TargetComboBox.Items | Where-Object { [string]$_ -match 'Todas autorizadas' }).Count | Should -Be 0
+        }
+        finally {
+            $formSingle.Dispose()
+        }
+
+        # Caso 3: 3 máquinas (incluindo |PrintServer) e repasse de -AllowedComputersPath
+        $script:capturedUiAllowPath = $null
+        Mock Get-SpoolerAllowedComputer {
+            param([string]$AllowedComputersPath)
+            $script:capturedUiAllowPath = $AllowedComputersPath
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-FIN-01'; IsPrintServer = $false },
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'SRV-PRINT-01'; IsPrintServer = $true },
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'ESTACAO-02.empresa.local'; IsPrintServer = $false }
+            )
+        }
+        $formMulti = Initialize-SpoolDoctorForm -LogPath $script:logPath -AllowedComputersPath $customAllowPath
+        try {
+            $uiMulti = $formMulti.Tag
+            $script:capturedUiAllowPath | Should -Be $customAllowPath
+            $uiMulti.AllowedComputersPath | Should -Be $customAllowPath
+            $uiMulti.TargetComboBox.Items.Count | Should -Be 5
+            $uiMulti.TargetComboBox.SelectedIndex | Should -Be 0
+            [string]$uiMulti.TargetComboBox.Items[0] | Should -Be ("Local ({0})" -f $env:COMPUTERNAME)
+            [string]$uiMulti.TargetComboBox.Items[1] | Should -Be 'PC-FIN-01'
+            [string]$uiMulti.TargetComboBox.Items[2] | Should -Be 'SRV-PRINT-01 [Servidor de Impressão]'
+            [string]$uiMulti.TargetComboBox.Items[3] | Should -Be 'ESTACAO-02.empresa.local'
+            [string]$uiMulti.TargetComboBox.Items[4] | Should -Be 'Todas autorizadas (3 máquinas)'
+        }
+        finally {
+            $formMulti.Dispose()
+        }
+
+        # Caso 4: erro ao carregar allow-list degrada para modo local com aviso claro
+        Mock Get-SpoolerAllowedComputer {
+            throw 'Arquivo allowed-computers inválido.'
+        }
+        $formFailed = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $uiFailed = $formFailed.Tag
+            $uiFailed.TargetComboBox.Items.Count | Should -Be 1
+            $uiFailed.TargetComboBox.SelectedIndex | Should -Be 0
+            [string]$uiFailed.TargetComboBox.Items[0] | Should -Be ("Local ({0})" -f $env:COMPUTERNAME)
+            $uiFailed.StatusTextBox.Text | Should -Match '\[AVISO\].*Arquivo allowed-computers inválido\.'
+        }
+        finally {
+            $formFailed.Dispose()
+        }
+    }
+
+    It 'direciona -ComputerName e -AllowedComputersPath corretamente no modo local, remoto único e cancelamento por $row.Tag' {
+        $customAllowPath = Join-Path -Path 'TestDrive:\' -ChildPath 'ui-route-allowed.txt'
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-FIN-01'; IsPrintServer = $false },
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-ATEND-02'; IsPrintServer = $false }
+            )
+        }
+
+        $script:capturedGetJobBound = $null
+        $script:capturedTestBound = $null
+        $script:capturedRemoveBound = $null
+        $script:capturedResetBound = $null
+        $script:capturedRouteConfirmMsg = $null
+
+        Mock Get-SpoolerJob {
+            param([string]$PrinterName, [string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath)
+            $script:capturedGetJobBound = @{} + $PSBoundParameters
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.PrintJob'
+                    Id           = 11
+                    PrinterName  = 'HP-01'
+                    Document     = 'Doc1.pdf'
+                    SizeBytes    = 1024L
+                    SubmittedAt  = [datetime]'2026-11-22T15:00:00'
+                    Age          = [timespan]::FromMinutes(2)
+                    Status       = 'Printing'
+                    ComputerName = 'PC-FIN-01'
+                },
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.PrintJob'
+                    Id           = 22
+                    PrinterName  = 'HP-02'
+                    Document     = 'Doc2.pdf'
+                    SizeBytes    = 2048L
+                    SubmittedAt  = [datetime]'2026-11-22T15:01:00'
+                    Age          = [timespan]::FromMinutes(1)
+                    Status       = 'Error'
+                    ComputerName = 'PC-ATEND-02'
+                }
+            )
+        }
+        Mock Test-Spooler {
+            param([int]$StuckThresholdMinutes, [string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath)
+            $script:capturedTestBound = @{} + $PSBoundParameters
+            return [PSCustomObject]@{
+                PSTypeName          = 'SpoolDoctor.Diagnostic'
+                ComputerName        = 'PC-FIN-01'
+                ServiceStatus       = 'Running'
+                PrinterCount        = 1
+                UnhealthyPrinters   = @()
+                JobCount            = 0
+                StuckJobs           = @()
+                SpoolFileCount      = 0
+                HasOrphanSpoolFiles = $false
+                Health              = 'Healthy'
+                IsHealthy           = $true
+                Issues              = @()
+                Recommendation      = 'Spooler saudável.'
+                Timestamp           = Get-Date
+            }
+        }
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedRouteConfirmMsg = $Message
+            return $true
+        }
+        Mock Remove-SpoolerJob {
+            param([string]$PrinterName, [int]$Id, [string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath)
+            $script:capturedRemoveBound = @{} + $PSBoundParameters
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = 'PC-FIN-01'
+                Action       = 'Remove-SpoolerJob'
+                Outcome      = 'OK'
+                Message      = 'Job cancelado.'
+                Timestamp    = Get-Date
+            }
+        }
+        Mock Reset-Spooler {
+            param([string]$LogPath, [switch]$SkipBackup, [string]$BackupPath, [int]$BackupRetentionDays, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:capturedResetBound = @{} + $PSBoundParameters
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = 'PC-FIN-01'
+                Action       = 'Reset-Spooler'
+                Outcome      = 'OK'
+                Message      = 'Reset concluído.'
+                Timestamp    = Get-Date
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath -AllowedComputersPath $customAllowPath
+        try {
+            $ui = $form.Tag
+
+            # Alvo Local: não deve repassar ComputerName, AllowedComputersPath nem Credential
+            $ui.TargetComboBox.SelectedIndex = 0
+            Invoke-SpoolDoctorRefresh -Form $form
+            $script:capturedGetJobBound.ContainsKey('ComputerName') | Should -BeFalse
+            $script:capturedGetJobBound.ContainsKey('AllowedComputersPath') | Should -BeFalse
+            $script:capturedGetJobBound.ContainsKey('Credential') | Should -BeFalse
+
+            Invoke-SpoolDoctorDiagnose -Form $form
+            $script:capturedTestBound.ContainsKey('ComputerName') | Should -BeFalse
+            $script:capturedTestBound.ContainsKey('AllowedComputersPath') | Should -BeFalse
+
+            Invoke-SpoolDoctorReset -Form $form
+            $script:capturedResetBound.ContainsKey('ComputerName') | Should -BeFalse
+            $script:capturedResetBound.ContainsKey('AllowedComputersPath') | Should -BeFalse
+            $script:capturedResetBound.ContainsKey('AllowPrintServer') | Should -BeFalse
+
+            # Alvo Remoto único: PC-FIN-01
+            $ui.TargetComboBox.SelectedIndex = 1
+            Invoke-SpoolDoctorRefresh -Form $form
+            @($script:capturedGetJobBound['ComputerName']) | Should -Be @('PC-FIN-01')
+            $script:capturedGetJobBound['AllowedComputersPath'] | Should -Be $customAllowPath
+
+            Invoke-SpoolDoctorDiagnose -Form $form
+            @($script:capturedTestBound['ComputerName']) | Should -Be @('PC-FIN-01')
+            $script:capturedTestBound['AllowedComputersPath'] | Should -Be $customAllowPath
+
+            $ui.Grid.Rows[0].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+            Invoke-SpoolDoctorCancelJob -Form $form
+            $script:capturedRouteConfirmMsg | Should -Match 'PC-FIN-01'
+            @($script:capturedRemoveBound['ComputerName']) | Should -Be @('PC-FIN-01')
+            $script:capturedRemoveBound['AllowedComputersPath'] | Should -Be $customAllowPath
+            $script:capturedRemoveBound['Id'] | Should -Be 11
+
+            Invoke-SpoolDoctorReset -Form $form
+            $script:capturedRouteConfirmMsg | Should -Match 'PC-FIN-01'
+            @($script:capturedResetBound['ComputerName']) | Should -Be @('PC-FIN-01')
+            $script:capturedResetBound['AllowedComputersPath'] | Should -Be $customAllowPath
+            $script:capturedResetBound.ContainsKey('AllowPrintServer') | Should -BeFalse
+
+            # Modo lote: cancelamento usa ComputerName do job em $row.Tag (PC-ATEND-02)
+            $ui.TargetComboBox.SelectedIndex = 3
+            Invoke-SpoolDoctorRefresh -Form $form
+            $ui.Grid.Rows[1].Cells['ComputerName'].Value | Should -Be 'PC-ATEND-02'
+            $ui.Grid.Rows[1].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+            Invoke-SpoolDoctorCancelJob -Form $form
+            $script:capturedRouteConfirmMsg | Should -Match 'PC-ATEND-02'
+            @($script:capturedRemoveBound['ComputerName']) | Should -Be @('PC-ATEND-02')
+            $script:capturedRemoveBound['AllowedComputersPath'] | Should -Be $customAllowPath
+            $script:capturedRemoveBound['Id'] | Should -Be 22
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'trata modo lote na UI para Get-SpoolerJob (erros não terminativos), Test-Spooler (múltiplos diagnósticos) e Reset-Spooler (sem -AllowPrintServer)' {
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-01'; IsPrintServer = $false },
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-02'; IsPrintServer = $false },
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'SRV-PRINT-01'; IsPrintServer = $true }
+            )
+        }
+
+        Mock Get-SpoolerJob {
+            [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.PrintJob'
+                Id           = 101
+                PrinterName  = 'HP-01'
+                Document     = 'Lote1.pdf'
+                SizeBytes    = 1024L
+                SubmittedAt  = [datetime]'2026-11-22T16:00:00'
+                Age          = [timespan]::FromMinutes(4)
+                Status       = 'Printing'
+                ComputerName = 'PC-01'
+            }
+            Write-Error -Message "Máquina 'PC-02' inacessível via WinRM." -ErrorId 'SpoolDoctor.Unreachable' -TargetObject 'PC-02' -Category ConnectionError
+            [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.PrintJob'
+                Id           = 303
+                PrinterName  = 'Lexmark-SRV'
+                Document     = 'Lote3.pdf'
+                SizeBytes    = 2048L
+                SubmittedAt  = [datetime]'2026-11-22T16:02:00'
+                Age          = [timespan]::FromMinutes(2)
+                Status       = 'Error'
+                ComputerName = 'SRV-PRINT-01'
+            }
+        }
+
+        Mock Test-Spooler {
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName          = 'SpoolDoctor.Diagnostic'
+                    ComputerName        = 'PC-01'
+                    ServiceStatus       = 'Running'
+                    PrinterCount        = 2
+                    UnhealthyPrinters   = @()
+                    JobCount            = 0
+                    StuckJobs           = @()
+                    SpoolFileCount      = 0
+                    HasOrphanSpoolFiles = $false
+                    Health              = 'Healthy'
+                    IsHealthy           = $true
+                    Issues              = @()
+                    Recommendation      = 'Spooler saudável.'
+                    Timestamp           = [datetime]'2026-11-22T16:05:00'
+                },
+                [PSCustomObject]@{
+                    PSTypeName          = 'SpoolDoctor.Diagnostic'
+                    ComputerName        = 'PC-02'
+                    ServiceStatus       = 'Unknown'
+                    PrinterCount        = $null
+                    UnhealthyPrinters   = @()
+                    JobCount            = $null
+                    StuckJobs           = @()
+                    SpoolFileCount      = $null
+                    HasOrphanSpoolFiles = $false
+                    Health              = 'Unreachable'
+                    IsHealthy           = $false
+                    Issues              = @("Máquina 'PC-02' inacessível.")
+                    Recommendation      = "Verifique se a máquina 'PC-02' está ligada e com WinRM habilitado."
+                    Timestamp           = [datetime]'2026-11-22T16:05:01'
+                },
+                [PSCustomObject]@{
+                    PSTypeName          = 'SpoolDoctor.Diagnostic'
+                    ComputerName        = 'SRV-PRINT-01'
+                    ServiceStatus       = 'Running'
+                    PrinterCount        = 5
+                    UnhealthyPrinters   = @()
+                    JobCount            = 1
+                    StuckJobs           = @(@{ Id = 303 })
+                    SpoolFileCount      = 2
+                    HasOrphanSpoolFiles = $false
+                    Health              = 'Warning'
+                    IsHealthy           = $false
+                    Issues              = @("Job 303 travado em 'SRV-PRINT-01'.")
+                    Recommendation      = 'Tente cancelar primeiro.'
+                    Timestamp           = [datetime]'2026-11-22T16:05:02'
+                }
+            )
+        }
+
+        $script:capturedBatchResetConfirmMsg = $null
+        $script:capturedBatchResetBound = $null
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedBatchResetConfirmMsg = $Message
+            return $true
+        }
+        Mock Reset-Spooler {
+            param([string]$LogPath, [switch]$SkipBackup, [string]$BackupPath, [int]$BackupRetentionDays, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:capturedBatchResetBound = @{} + $PSBoundParameters
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.ActionResult'
+                    ComputerName = 'PC-01'
+                    Action       = 'Reset-Spooler'
+                    Outcome      = 'OK'
+                    Message      = "Spooler reiniciado com sucesso na máquina 'PC-01'."
+                    Timestamp    = [datetime]'2026-11-22T16:06:00'
+                },
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.ActionResult'
+                    ComputerName = 'PC-02'
+                    Action       = 'Reset-Spooler'
+                    Outcome      = 'Unreachable'
+                    Message      = "Máquina 'PC-02' inacessível via WinRM."
+                    Timestamp    = [datetime]'2026-11-22T16:06:01'
+                },
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.ActionResult'
+                    ComputerName = 'SRV-PRINT-01'
+                    Action       = 'Reset-Spooler'
+                    Outcome      = 'Failed'
+                    Message      = "Reset bloqueado na máquina 'SRV-PRINT-01' (marcada como servidor de impressão)."
+                    Timestamp    = [datetime]'2026-11-22T16:06:02'
+                }
+            )
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.TargetComboBox.SelectedIndex = 4
+
+            # Refresh em lote: mantém jobs saudáveis e exibe erro não terminativo de PC-02
+            Invoke-SpoolDoctorRefresh -Form $form
+            $ui.Grid.Rows.Count | Should -Be 2
+            $ui.Grid.Rows[0].Cells['ComputerName'].Value | Should -Be 'PC-01'
+            $ui.Grid.Rows[1].Cells['ComputerName'].Value | Should -Be 'SRV-PRINT-01'
+            $ui.StatusTextBox.Text | Should -Match 'Jobs encontrados: 2'
+            $ui.StatusTextBox.Text | Should -Match 'PC-02'
+            $ui.StatusTextBox.Text | Should -Match 'inacessível'
+
+            # Diagnóstico em lote: múltiplos objetos e N/D para contagens nulas
+            Invoke-SpoolDoctorDiagnose -Form $form
+            $ui.StatusTextBox.Text | Should -Match '3 máquinas'
+            $ui.StatusTextBox.Text | Should -Match 'PC-01'
+            $ui.StatusTextBox.Text | Should -Match 'PC-02'
+            $ui.StatusTextBox.Text | Should -Match 'SRV-PRINT-01'
+            $ui.StatusTextBox.Text | Should -Match 'Impressoras: N/D \| Jobs: N/D'
+            $ui.StatusTextBox.Text | Should -Match 'sem permissão/indisponível'
+
+            # Reset em lote: lista alvos, avisa sobre |PrintServer e nunca passa -AllowPrintServer
+            Invoke-SpoolDoctorReset -Form $form
+            $script:capturedBatchResetConfirmMsg | Should -Match 'PC-01'
+            $script:capturedBatchResetConfirmMsg | Should -Match 'PC-02'
+            $script:capturedBatchResetConfirmMsg | Should -Match 'SRV-PRINT-01'
+            $script:capturedBatchResetConfirmMsg | Should -Match 'PrintServer|Servidor de Impressão'
+            @($script:capturedBatchResetBound['ComputerName']) | Should -Be @('PC-01', 'PC-02', 'SRV-PRINT-01')
+            $script:capturedBatchResetBound.ContainsKey('AllowPrintServer') | Should -BeFalse
+
+            Should -Invoke Get-SpoolerJob -Times 2 -Exactly
+            $ui.StatusTextBox.Text | Should -Match '\[OK\]'
+            $ui.StatusTextBox.Text | Should -Match '\[Unreachable\]'
+            $ui.StatusTextBox.Text | Should -Match '\[Failed\]'
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'habilita Cancelar e Resetar no modo remoto mesmo sem UAC local, mantendo bloqueio no modo local' {
+        Mock Test-SpoolDoctorElevated { return $false }
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-REMOTO-01'; IsPrintServer = $false }
+            )
+        }
+        Mock Get-SpoolerJob {
+            param([string[]]$ComputerName)
+            $jobHost = if ($PSBoundParameters.ContainsKey('ComputerName') -and $ComputerName.Count -gt 0) { $ComputerName[0] } else { $env:COMPUTERNAME }
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.PrintJob'
+                    Id           = 90
+                    PrinterName  = 'HP-Test'
+                    Document     = 'Teste.pdf'
+                    SizeBytes    = 1024L
+                    SubmittedAt  = [datetime]'2026-11-22T17:00:00'
+                    Age          = [timespan]::FromMinutes(3)
+                    Status       = 'Printing'
+                    ComputerName = $jobHost
+                }
+            )
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+
+            # Modo local sem UAC: somente leitura
+            $ui.PrivilegeLabel.Text | Should -Match 'Usuário padrão'
+            $ui.PrivilegeLabel.Text | Should -Match 'somente leitura'
+            $ui.ResetButton.Enabled | Should -BeFalse
+            $ui.CancelButton.Enabled | Should -BeFalse
+
+            Invoke-SpoolDoctorRefresh -Form $form
+            $ui.Grid.Rows[0].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+            $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.ResetButton.Enabled | Should -BeFalse
+
+            # Muda para alvo remoto: habilita Resetar e Cancelar (com job remoto selecionado)
+            $ui.TargetComboBox.SelectedIndex = 1
+            $ui.PrivilegeLabel.Text | Should -Match 'Usuário padrão'
+            $ui.PrivilegeLabel.Text | Should -Match 'destino'
+            $ui.ResetButton.Enabled | Should -BeTrue
+            $ui.CancelButton.Enabled | Should -BeFalse
+
+            Invoke-SpoolDoctorRefresh -Form $form
+            $ui.Grid.Rows[0].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+            $ui.CancelButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeTrue
+
+            # Volta para alvo local e carrega fila local: volta a bloquear Cancelar e Resetar
+            $ui.TargetComboBox.SelectedIndex = 0
+            $ui.ResetButton.Enabled | Should -BeFalse
+            Invoke-SpoolDoctorRefresh -Form $form
+            $ui.Grid.Rows[0].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+            $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.ResetButton.Enabled | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'gerencia credencial alternativa apenas em memória e somente em alvos remotos sem expor usuário ou senha' {
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-REMOTO-01'; IsPrintServer = $false }
+            )
+        }
+
+        $secretPlain = 'SegredoSuperForte99!'
+        $securePwd = ConvertTo-SecureString -String $secretPlain -AsPlainText -Force
+        $fakeCred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList @('DOMINIO\operador_remoto', $securePwd)
+
+        $script:credPromptShouldCancel = $true
+        Mock Request-SpoolDoctorCredential {
+            if ($script:credPromptShouldCancel) {
+                return $null
+            }
+            return $fakeCred
+        }
+
+        $script:lastJobCred = $null
+        $script:lastDiagCred = $null
+        $script:lastCancelCred = $null
+        $script:lastResetCred = $null
+
+        Mock Get-SpoolerJob {
+            param([string]$PrinterName, [string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath)
+            $script:lastJobCred = if ($PSBoundParameters.ContainsKey('Credential')) { $PSBoundParameters['Credential'] } else { $null }
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.PrintJob'
+                    Id           = 55
+                    PrinterName  = 'HP-Remota'
+                    Document     = 'Folha.pdf'
+                    SizeBytes    = 512L
+                    SubmittedAt  = [datetime]'2026-11-22T17:10:00'
+                    Age          = [timespan]::FromMinutes(1)
+                    Status       = 'Printing'
+                    ComputerName = 'PC-REMOTO-01'
+                }
+            )
+        }
+        Mock Test-Spooler {
+            param([int]$StuckThresholdMinutes, [string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath)
+            $script:lastDiagCred = if ($PSBoundParameters.ContainsKey('Credential')) { $PSBoundParameters['Credential'] } else { $null }
+            return [PSCustomObject]@{
+                PSTypeName          = 'SpoolDoctor.Diagnostic'
+                ComputerName        = 'PC-REMOTO-01'
+                ServiceStatus       = 'Running'
+                PrinterCount        = 1
+                UnhealthyPrinters   = @()
+                JobCount            = 0
+                StuckJobs           = @()
+                SpoolFileCount      = 0
+                HasOrphanSpoolFiles = $false
+                Health              = 'Healthy'
+                IsHealthy           = $true
+                Issues              = @()
+                Recommendation      = 'Spooler saudável.'
+                Timestamp           = Get-Date
+            }
+        }
+        Mock Confirm-SpoolDoctorAction { return $true }
+        Mock Remove-SpoolerJob {
+            param([string]$PrinterName, [int]$Id, [string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath)
+            $script:lastCancelCred = if ($PSBoundParameters.ContainsKey('Credential')) { $PSBoundParameters['Credential'] } else { $null }
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = 'PC-REMOTO-01'
+                Action       = 'Remove-SpoolerJob'
+                Outcome      = 'OK'
+                Message      = 'Job cancelado.'
+                Timestamp    = Get-Date
+            }
+        }
+        Mock Reset-Spooler {
+            param([string]$LogPath, [switch]$SkipBackup, [string]$BackupPath, [int]$BackupRetentionDays, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:lastResetCred = if ($PSBoundParameters.ContainsKey('Credential')) { $PSBoundParameters['Credential'] } else { $null }
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = 'PC-REMOTO-01'
+                Action       = 'Reset-Spooler'
+                Outcome      = 'OK'
+                Message      = 'Reset concluído.'
+                Timestamp    = Get-Date
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        $uiRef = $form.Tag
+        try {
+            $uiRef.CredentialCheckBox.Enabled | Should -BeFalse
+
+            # Seleciona remoto e cancela prompt de credencial (não pode reentrar)
+            $uiRef.TargetComboBox.SelectedIndex = 1
+            $uiRef.CredentialCheckBox.Enabled | Should -BeTrue
+            $uiRef.CredentialCheckBox.Checked = $true
+
+            Should -Invoke Request-SpoolDoctorCredential -Times 1 -Exactly
+            $uiRef.CredentialCheckBox.Checked | Should -BeFalse
+            $uiRef.Credential | Should -BeNullOrEmpty
+
+            # Aceita prompt de credencial
+            $script:credPromptShouldCancel = $false
+            $uiRef.CredentialCheckBox.Checked = $true
+
+            Should -Invoke Request-SpoolDoctorCredential -Times 2 -Exactly
+            $uiRef.CredentialCheckBox.Checked | Should -BeTrue
+            $uiRef.Credential | Should -Not -BeNullOrEmpty
+            $uiRef.Credential.UserName | Should -Be 'DOMINIO\operador_remoto'
+
+            # Repassa credencial em todas as operações remotas
+            Invoke-SpoolDoctorRefresh -Form $form
+            $script:lastJobCred.UserName | Should -Be 'DOMINIO\operador_remoto'
+
+            Invoke-SpoolDoctorDiagnose -Form $form
+            $script:lastDiagCred.UserName | Should -Be 'DOMINIO\operador_remoto'
+
+            $uiRef.Grid.Rows[0].Selected = $true
+            Sync-SpoolDoctorSelectionState -Form $form
+            Invoke-SpoolDoctorCancelJob -Form $form
+            $script:lastCancelCred.UserName | Should -Be 'DOMINIO\operador_remoto'
+
+            Invoke-SpoolDoctorReset -Form $form
+            $script:lastResetCred.UserName | Should -Be 'DOMINIO\operador_remoto'
+
+            # Status nunca vaza usuário nem senha
+            $uiRef.StatusTextBox.Text | Should -Not -Match 'operador_remoto'
+            $uiRef.StatusTextBox.Text | Should -Not -Match ([regex]::Escape($secretPlain))
+
+            # Ao voltar para Local, CredentialCheckBox desabilita e -Credential nunca é repassado
+            $uiRef.TargetComboBox.SelectedIndex = 0
+            $uiRef.CredentialCheckBox.Enabled | Should -BeFalse
+
+            Invoke-SpoolDoctorRefresh -Form $form
+            $script:lastJobCred | Should -BeNullOrEmpty
+
+            Invoke-SpoolDoctorDiagnose -Form $form
+            $script:lastDiagCred | Should -BeNullOrEmpty
+
+            Invoke-SpoolDoctorReset -Form $form
+            $script:lastResetCred | Should -BeNullOrEmpty
+
+            # Ao voltar para remoto e desmarcar, limpa credencial da memória
+            $uiRef.TargetComboBox.SelectedIndex = 1
+            $uiRef.CredentialCheckBox.Checked = $false
+            $uiRef.Credential | Should -BeNullOrEmpty
+
+            Invoke-SpoolDoctorRefresh -Form $form
+            $script:lastJobCred | Should -BeNullOrEmpty
+
+            # Marca novamente e descarta formulário: credencial é limpa da memória no fechamento/dispose
+            $uiRef.CredentialCheckBox.Checked = $true
+            $uiRef.Credential | Should -Not -BeNullOrEmpty
+        }
+        finally {
+            $form.Dispose()
+        }
+
+        $uiRef.Credential | Should -BeNullOrEmpty
+    }
+
+    It 'exige confirmação reforçada em 2 etapas para Resetar Spooler em servidor de impressão (|PrintServer)' {
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'SRV-PRINT-01'; IsPrintServer = $true }
+            )
+        }
+
+        $script:psConfirmMessages = New-Object -TypeName 'System.Collections.Generic.List[string]'
+        $script:psConfirmScenario = 'RejectFirst'
+        $script:capturedPsResetBound = $null
+        $script:capturedPsResetWhatIf = $false
+
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:psConfirmMessages.Add($Message)
+            switch ($script:psConfirmScenario) {
+                'RejectFirst' { return $false }
+                'RejectSecond' { return ($script:psConfirmMessages.Count -eq 1) }
+                'AcceptBoth' { return $true }
+            }
+            return $false
+        }
+        Mock Reset-Spooler {
+            param([string]$LogPath, [switch]$SkipBackup, [string]$BackupPath, [int]$BackupRetentionDays, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:capturedPsResetBound = @{} + $PSBoundParameters
+            $script:capturedPsResetWhatIf = [bool]$WhatIfPreference
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = 'SRV-PRINT-01'
+                Action       = 'Reset-Spooler'
+                Outcome      = 'OK'
+                Message      = 'Reset autorizado em servidor de impressão.'
+                Timestamp    = Get-Date
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.TargetComboBox.SelectedIndex = 1
+
+            # Recusa na 1ª etapa
+            $script:psConfirmScenario = 'RejectFirst'
+            $script:psConfirmMessages.Clear()
+            Invoke-SpoolDoctorReset -Form $form
+            $script:psConfirmMessages.Count | Should -Be 1
+            $script:psConfirmMessages[0] | Should -Match 'SERVIDOR DE IMPRESSÃO'
+            $script:psConfirmMessages[0] | Should -Match 'SRV-PRINT-01'
+            Should -Invoke Reset-Spooler -Times 0 -Exactly
+
+            # Aceita 1ª, recusa 2ª etapa
+            $script:psConfirmScenario = 'RejectSecond'
+            $script:psConfirmMessages.Clear()
+            Invoke-SpoolDoctorReset -Form $form
+            $script:psConfirmMessages.Count | Should -Be 2
+            $script:psConfirmMessages[1] | Should -Match 'CONFIRMAÇÃO REFORÇADA'
+            $script:psConfirmMessages[1] | Should -Match 'SRV-PRINT-01'
+            Should -Invoke Reset-Spooler -Times 0 -Exactly
+
+            # Aceita ambas as etapas: repassa -AllowPrintServer e -ComputerName
+            $script:psConfirmScenario = 'AcceptBoth'
+            $script:psConfirmMessages.Clear()
+            Invoke-SpoolDoctorReset -Form $form
+            $script:psConfirmMessages.Count | Should -Be 2
+            Should -Invoke Reset-Spooler -Times 1 -Exactly
+            @($script:capturedPsResetBound['ComputerName']) | Should -Be @('SRV-PRINT-01')
+            ([bool]$script:capturedPsResetBound['AllowPrintServer']) | Should -BeTrue
+
+            # Aceita ambas com -WhatIf: também repassa -AllowPrintServer
+            $script:psConfirmMessages.Clear()
+            $script:capturedPsResetBound = $null
+            $script:capturedPsResetWhatIf = $false
+            $ui.WhatIfCheckBox.Checked = $true
+            Invoke-SpoolDoctorReset -Form $form
+            $script:psConfirmMessages.Count | Should -Be 2
+            $script:psConfirmMessages[0] | Should -Match 'simula|-WhatIf'
+            $script:psConfirmMessages[1] | Should -Match 'simula|-WhatIf'
+            Should -Invoke Reset-Spooler -Times 2 -Exactly
+            @($script:capturedPsResetBound['ComputerName']) | Should -Be @('SRV-PRINT-01')
+            ([bool]$script:capturedPsResetBound['AllowPrintServer']) | Should -BeTrue
+            $script:capturedPsResetWhatIf | Should -BeTrue
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'preserva -AllowedComputersPath entre aspas nos argumentos de elevação UAC' {
+        $spaceScriptPath = 'D:\Pasta Com Espaços\ui\SpoolDoctorUI.ps1'
+        $spaceAllowPath = 'C:\Config Com Espaço\allowed-computers.txt'
+
+        $args = @(Get-SpoolDoctorElevationArgumentList -ScriptPath $spaceScriptPath -AllowedComputersPath $spaceAllowPath)
+        $fileIdx = [Array]::IndexOf($args, '-File')
+        $allowIdx = [Array]::IndexOf($args, '-AllowedComputersPath')
+
+        $allowIdx | Should -BeGreaterThan $fileIdx
+        $args[$allowIdx + 1] | Should -Be ('"{0}"' -f $spaceAllowPath)
     }
 }

@@ -61,8 +61,16 @@ Quando a fila de impressão trava, o v0 resolve apagando tudo e reiniciando o sp
       - `Get-SpoolerJob`: em máquina única (`$resolvedTargets.Count -le 1`) grava log e lança `throw`; em lote (`$resolvedTargets.Count -gt 1`) emite os objetos `SpoolDoctor.PrintJob` das máquinas bem-sucedidas (mantendo atomicidade intra-máquina), grava 1 linha de log por máquina e reporta cada falha isolada via erro não terminativo (`$PSCmdlet.WriteError` com `FullyQualifiedErrorId = "SpoolDoctor.<Outcome>"`, `TargetObject = <ComputerName>` e categoria `ConnectionError` quando `Unreachable`), mantendo o stream de saída composto apenas por `SpoolDoctor.PrintJob` e prosseguindo para as demais máquinas.
     - **Confirmação, `-WhatIf` e sessões por máquina:** `$PSCmdlet.ShouldProcess` é avaliado individualmente exibindo o hostname correspondente (e `[SERVIDOR DE IMPRESSÃO]` com `-AllowPrintServer` no `Reset-Spooler`), sem abrir sessão WinRM em `-WhatIf` ou recusa de `-Confirm`, e encerrando todas as sessões abertas em bloco `finally`.
     - **Preservação do pipeline em `Remove-SpoolerJob`:** `-ComputerName` permanece sem `ValueFromPipelineByPropertyName`, preservando integralmente `Get-SpoolerJob | Remove-SpoolerJob`.
+  - **Exposição pública somente leitura da allow-list:** `Get-SpoolerAllowedComputer` em `src/Public/` (opcional `[string]$AllowedComputersPath`) delega diretamente para `Get-AllowedComputer` em `src/Remote/` e retorna `SpoolDoctor.AllowedComputer[]` sem duplicar parsing na interface.
   - **Pré-requisitos (fora do controle do código):** WinRM habilitado na máquina de destino e conta com permissão de administrador nela. Em ambiente corporativo, isso depende do setor de TI: combinar com a TI **antes** de testar em máquinas reais.
-- **RF11.** Interface gráfica (WinForms dentro do PowerShell) com lista de jobs, botões e confirmação.
+- **RF11.** Interface gráfica (WinForms dentro do PowerShell) como camada fina sobre o módulo `SpoolDoctor`, com lista de jobs, botões, confirmação, seleção remota e modo em lote:
+  - Aceita parâmetro opcional `-AllowedComputersPath`, repassado para `Get-SpoolerAllowedComputer`, para as operações remotas (`Get-SpoolerJob`, `Remove-SpoolerJob`, `Reset-Spooler`, `Test-Spooler`) e preservado (com aspas) no relançamento UAC.
+  - Cabeçalho com seletor de alvo (`ComboBox` `DropDownStyle = DropDownList`) populado via `Get-SpoolerAllowedComputer`: `Local (<COMPUTERNAME>)` como padrão; cada máquina autorizada (marcando `[Servidor de Impressão]` quando `IsPrintServer = $true`); e, quando houver 2 ou mais máquinas na allow-list, a opção de lote `Todas autorizadas (<N> máquinas)`. Se a allow-list estiver vazia (só comentários), opera normalmente apenas no modo local sem erro; se falhar ao carregar, abre no modo local exibindo `[AVISO]` claro no painel de status.
+  - Grade (`DataGridView`) com 8 colunas incluindo **`Máquina`** (`ComputerName`). Ao cancelar um job selecionado na grade (inclusive em lote), usa o `ComputerName` armazenado em `$row.Tag` para direcionar `Remove-SpoolerJob` à máquina exata e exibe esse hostname no diálogo de confirmação.
+  - Opção discreta de credencial alternativa em memória (`CheckBox "Usar credencial alternativa"` + wrapper mockável `Request-SpoolDoctorCredential` encapsulando `Get-Credential`), habilitada apenas para alvos remotos (desabilitada e nunca repassada em alvo local, conforme RF10), limpa ao desmarcar ou fechar a janela, sem persistência em disco e sem registrar usuário ou senha em status ou log (Safeguard 10).
+  - Privilégio local vs. remoto (Safeguard 3): quando sem UAC local (`IsElevated = $false`), mantém `Cancelar job selecionado` e `Resetar Spooler` desabilitados para alvo/jobs locais, mas habilita `Resetar Spooler` ao selecionar alvo remoto e `Cancelar job selecionado` ao selecionar um job remoto na grade (pois o administrador é validado no destino via WinRM).
+  - Proteção de servidor de impressão (`|PrintServer`, Safeguard 8): `Resetar Spooler` em alvo individual marcado como `|PrintServer` exige confirmação reforçada em 2 etapas (`Warning` com aviso explícito `[SERVIDOR DE IMPRESSÃO]` + `Error` confirmando explicitamente `-AllowPrintServer`, ambas com botão padrão `Não`); no modo lote, a UI **nunca** passa `-AllowPrintServer` e avisa na confirmação que servidores `|PrintServer` serão bloqueados automaticamente.
+  - Tratamento de lote na UI: `Invoke-SpoolDoctorRefresh` captura erros não terminativos de `Get-SpoolerJob` (`-ErrorVariable ... -ErrorAction Continue`) para exibir os jobs das máquinas saudáveis na grade e listar as falhas/`Unreachable` no painel de status; `Invoke-SpoolDoctorDiagnose` formata 1 ou múltiplos objetos `SpoolDoctor.Diagnostic` (exibindo `N/D` quando `PrinterCount` ou `JobCount` forem `$null`); `Invoke-SpoolDoctorReset` formata 1 ou múltiplos `ActionResult`.
 - **RF12.** Launcher `.bat` de uma linha para duplo clique.
 
 ### Requisitos não funcionais
@@ -86,7 +94,7 @@ Spec atualizado, testes Pester passando, PSScriptAnalyzer sem avisos, teste manu
 - **SpoolerService:** estado (`Running`, `Stopped`, ...), máquina.
 - **ActionResult:** `ComputerName`, `Action`, `Outcome` (`OK`, `Failed`, `Unreachable`, `Skipped`, `Simulated`), `Message`, `Timestamp`.
 - **SpoolerDiagnostic:** `ComputerName`, `ServiceStatus`, `PrinterCount` (`[int]` ou `$null` quando indisponível em falha isolada de lote), `UnhealthyPrinters`, `JobCount` (`[int]` ou `$null` quando indisponível em falha isolada de lote), `StuckJobs`, `SpoolFileCount` (`[int]` ou `$null` se leitura de `PRINTERS` indisponível/negada), `HasOrphanSpoolFiles`, `Health` (`Healthy`, `Warning`, `Critical`; além de `Unreachable` e `Failed` para falhas isoladas em lote), `IsHealthy`, `Issues`, `Recommendation`, `Timestamp`.
-- **TargetList:** lista de máquinas permitidas (allow-list) lida de arquivo.
+- **TargetList:** lista de máquinas permitidas (allow-list) lida de arquivo, composta por objetos `SpoolDoctor.AllowedComputer` (`ComputerName`, `IsPrintServer`).
 
 Relações: Printer 1..N PrintJob; cada ação produz um ActionResult por máquina.
 
@@ -115,7 +123,7 @@ SpoolDoctor/
   src/
     SpoolDoctor.psd1
     SpoolDoctor.psm1
-    Public/    # Get-SpoolerJob, Remove-SpoolerJob, Reset-Spooler, Test-Spooler
+    Public/    # Get-SpoolerAllowedComputer, Get-SpoolerJob, Remove-SpoolerJob, Reset-Spooler, Test-Spooler
     Private/   # wrappers do sistema, log, backup, validação de caminho
     Remote/    # despacho remoto e leitura da allow-list
   ui/
@@ -144,6 +152,7 @@ Dependências: `ui` e `Iniciar.bat` dependem de `src`; `src/Public` depende de `
    - 5c. Elevação automática (RF8)
 6. **Remoto, uma máquina:** allow-list, `Invoke-Command`, relatório (RF10). Pré-requisito: WinRM e autorização da TI.
 7. **Remoto, em lote:** `[string[]]$ComputerName` nas 4 funções públicas com resolução/deduplicação via `Resolve-SpoolerTargetList`, modo lote determinado por `$resolvedTargets.Count -gt 1`, isolamento de falhas por máquina (Safeguard 9), `ShouldProcess`/`-WhatIf` individual por host e contratos de lote (`WriteError` não terminativo em `Get-SpoolerJob`; `SpoolDoctor.Diagnostic` de falha em `Test-Spooler`). A seleção remota na UI fica para etapa dedicada posterior.
+8. **Suporte remoto e em lote na UI WinForms:** exposição somente leitura da allow-list via `Get-SpoolerAllowedComputer`, seletor de máquina no cabeçalho (local, alvos autorizados e lote `Todas autorizadas`), coluna `Máquina` na grade, credencial alternativa apenas em memória para alvos remotos, adaptação de privilégio local vs. remoto (Safeguard 3), confirmação reforçada em 2 etapas para `|PrintServer` individual (nunca `-AllowPrintServer` em lote) e tratamento de erros parciais/múltiplos resultados na interface.
 
 Cada passo: teste primeiro (ou auditoria rigorosa do teste), implementação, revisão do diff, commit atômico.
 
