@@ -296,6 +296,156 @@
         }
     }
 
+    Context 'Resolve-SpoolerTargetList' {
+        BeforeEach {
+            $script:batchAllowListPath = Join-Path -Path 'TestDrive:\' -ChildPath ("resolve-list-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            @(
+                'PC-REMOTO-01'
+                'PC-REMOTO-02'
+                'SRV-PRINT-01|PrintServer'
+            ) | Set-Content -LiteralPath $script:batchAllowListPath -Encoding UTF8
+        }
+
+        It 'resolve como local quando -ComputerName é omitido e recusa -HasCredential' {
+            Mock Get-AllowedComputer -ModuleName SpoolDoctor { throw 'Não deveria ler allow-list.' }
+
+            $targets = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -AllowedComputersPath $ListPath
+            })
+
+            $targets.Count | Should -Be 1
+            $targets[0].IsValid | Should -BeTrue
+            $targets[0].IsLocal | Should -BeTrue
+            $targets[0].ComputerName | Should -Be $env:COMPUTERNAME
+
+            $credTargets = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -AllowedComputersPath $ListPath -HasCredential
+            })
+
+            $credTargets.Count | Should -Be 1
+            $credTargets[0].IsValid | Should -BeFalse
+            $credTargets[0].FailureOutcome | Should -Be 'Failed'
+            $credTargets[0].ErrorMessage | Should -Match 'Credential'
+            Should -Invoke Get-AllowedComputer -ModuleName SpoolDoctor -Times 0 -Exactly
+        }
+
+        It 'recusa -ComputerName nulo ou array vazio sem cair em execução local' {
+            Mock Get-AllowedComputer -ModuleName SpoolDoctor { throw 'Não deveria ler allow-list.' }
+
+            $nullTargets = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName $null -AllowedComputersPath $ListPath
+            })
+
+            $nullTargets.Count | Should -Be 1
+            $nullTargets[0].IsValid | Should -BeFalse
+            $nullTargets[0].IsLocal | Should -BeFalse
+            $nullTargets[0].ComputerName | Should -Be '(inválido)'
+            $nullTargets[0].FailureOutcome | Should -Be 'Failed'
+
+            $emptyTargets = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName @() -AllowedComputersPath $ListPath
+            })
+
+            $emptyTargets.Count | Should -Be 1
+            $emptyTargets[0].IsValid | Should -BeFalse
+            $emptyTargets[0].IsLocal | Should -BeFalse
+            $emptyTargets[0].ComputerName | Should -Be '(inválido)'
+            $emptyTargets[0].FailureOutcome | Should -Be 'Failed'
+
+            Should -Invoke Get-AllowedComputer -ModuleName SpoolDoctor -Times 0 -Exactly
+        }
+
+        It 'resolve múltiplos hosts autorizados preservando ordem, nomes canônicos e PrintServer' {
+            $targets = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName @('pc-remoto-01', 'PC-REMOTO-02', 'srv-print-01') -AllowedComputersPath $ListPath
+            })
+
+            $targets.Count | Should -Be 3
+            $targets[0].IsValid | Should -BeTrue
+            $targets[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $targets[0].IsPrintServerListed | Should -BeFalse
+
+            $targets[1].IsValid | Should -BeTrue
+            $targets[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $targets[1].IsPrintServerListed | Should -BeFalse
+
+            $targets[2].IsValid | Should -BeTrue
+            $targets[2].ComputerName | Should -Be 'SRV-PRINT-01'
+            $targets[2].IsPrintServerListed | Should -BeTrue
+        }
+
+        It 'deduplica alvos repetidos case-insensitive sem deixar item inválido suprimir alvo válido posterior' {
+            $deduped = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName @('PC-REMOTO-01', 'pc-remoto-01', 'localhost', $env:COMPUTERNAME, 'PC-REMOTO-02') -AllowedComputersPath $ListPath
+            })
+
+            $deduped.Count | Should -Be 3
+            $deduped[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $deduped[1].ComputerName | Should -Be $env:COMPUTERNAME
+            $deduped[1].IsLocal | Should -BeTrue
+            $deduped[2].ComputerName | Should -Be 'PC-REMOTO-02'
+
+            $invalidThenValid = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName @('PC-REMOTO-01 ', 'PC-REMOTO-01') -AllowedComputersPath $ListPath
+            })
+
+            $invalidThenValid.Count | Should -Be 2
+            $invalidThenValid[0].IsValid | Should -BeFalse
+            $invalidThenValid[0].FailureOutcome | Should -Be 'Failed'
+            $invalidThenValid[1].IsValid | Should -BeTrue
+            $invalidThenValid[1].ComputerName | Should -Be 'PC-REMOTO-01'
+        }
+
+        It 'isola entradas nulas, em branco e fora da allow-list misturadas na lista e aplica -HasCredential por alvo' {
+            $mixedInvalid = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName @('PC-REMOTO-01', $null, '   ', 'PC-INTRUSO', 'pc-intruso', 'PC-REMOTO-02') -AllowedComputersPath $ListPath
+            })
+
+            $mixedInvalid.Count | Should -Be 5
+            $mixedInvalid[0].IsValid | Should -BeTrue
+            $mixedInvalid[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $mixedInvalid[1].IsValid | Should -BeFalse
+            $mixedInvalid[1].ComputerName | Should -Be '(inválido)'
+            $mixedInvalid[2].IsValid | Should -BeFalse
+            $mixedInvalid[2].ComputerName | Should -Be '(inválido)'
+            $mixedInvalid[3].IsValid | Should -BeFalse
+            $mixedInvalid[3].ComputerName | Should -Be 'PC-INTRUSO'
+            $mixedInvalid[4].IsValid | Should -BeTrue
+            $mixedInvalid[4].ComputerName | Should -Be 'PC-REMOTO-02'
+
+            $mixedCred = @(InModuleScope 'SpoolDoctor' -Parameters @{ ListPath = $script:batchAllowListPath } {
+                param($ListPath)
+                Set-StrictMode -Version Latest
+                Resolve-SpoolerTargetList -ComputerName @('localhost', 'PC-REMOTO-01') -AllowedComputersPath $ListPath -HasCredential
+            })
+
+            $mixedCred.Count | Should -Be 2
+            $mixedCred[0].IsValid | Should -BeFalse
+            $mixedCred[0].IsLocal | Should -BeTrue
+            $mixedCred[0].FailureOutcome | Should -Be 'Failed'
+            $mixedCred[0].ErrorMessage | Should -Match 'Credential'
+            $mixedCred[1].IsValid | Should -BeTrue
+            $mixedCred[1].IsLocal | Should -BeFalse
+            $mixedCred[1].ComputerName | Should -Be 'PC-REMOTO-01'
+        }
+    }
+
     Context 'Get-RemoteFailureOutcome' {
         It 'classifica falhas de transporte WinRM, conectividade e timeout como Unreachable' {
             $transportEx = New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'Connecting to remote server PC-REMOTO-01 failed: WinRM cannot process the request.'
@@ -562,12 +712,37 @@
             $result.Message | Should -Match 'Erro ao fechar sessão\.'
             Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
         }
+
+        It 'injeta Resolve-SpoolerTargetList em memória nas 4 operações remotas (<OperationName>)' -ForEach @(
+            @{ OperationName = 'Get-SpoolerJob' }
+            @{ OperationName = 'Remove-SpoolerJob' }
+            @{ OperationName = 'Reset-Spooler' }
+            @{ OperationName = 'Test-Spooler' }
+        ) {
+            param($OperationName)
+
+            $script:capturedOpDefs = $null
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $script:capturedOpDefs = $ArgumentList[3]
+                return @()
+            }
+
+            $opResult = InModuleScope 'SpoolDoctor' -Parameters @{ OpName = $OperationName } {
+                param($OpName)
+                Invoke-SpoolerRemoteOperation -ComputerName 'PC-REMOTO-01' -Operation $OpName -Parameters @{}
+            }
+
+            $opResult.Success | Should -BeTrue
+            $script:capturedOpDefs.Keys | Should -Contain 'Resolve-SpoolerTarget'
+            $script:capturedOpDefs.Keys | Should -Contain 'Resolve-SpoolerTargetList'
+        }
     }
 
     Context 'Auditoria AST de src/Remote' {
         It 'mantém arquivos válidos no parser, sem Invoke-Expression ou Write-Host e com WinRM isolado nos wrappers' {
             $remoteFiles = @(Get-ChildItem -Path $script:remoteFolderPath -Filter '*.ps1' -File -ErrorAction Stop)
-            $remoteFiles.Count | Should -Be 9
+            $remoteFiles.Count | Should -Be 10
 
             foreach ($file in $remoteFiles) {
                 $tokens = $null

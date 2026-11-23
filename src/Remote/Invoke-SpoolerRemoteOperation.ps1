@@ -22,6 +22,7 @@
             @(
                 'Test-ValidComputerName',
                 'Resolve-SpoolerTarget',
+                'Resolve-SpoolerTargetList',
                 'Get-SpoolerPrinterRaw',
                 'Get-SpoolerJobRaw',
                 'Get-SpoolerJob'
@@ -31,6 +32,7 @@
             @(
                 'Test-ValidComputerName',
                 'Resolve-SpoolerTarget',
+                'Resolve-SpoolerTargetList',
                 'Test-IsAdministrator',
                 'Remove-SpoolerJobRaw',
                 'Get-SpoolerJobRaw',
@@ -41,6 +43,7 @@
             @(
                 'Test-ValidComputerName',
                 'Resolve-SpoolerTarget',
+                'Resolve-SpoolerTargetList',
                 'Test-IsAdministrator',
                 'Get-SpoolDirectoryPath',
                 'Test-SafeSpoolFilePath',
@@ -60,6 +63,7 @@
             @(
                 'Test-ValidComputerName',
                 'Resolve-SpoolerTarget',
+                'Resolve-SpoolerTargetList',
                 'Get-SpoolerServiceStatus',
                 'Get-SpoolerPrinterRaw',
                 'Get-SpoolerJobRaw',

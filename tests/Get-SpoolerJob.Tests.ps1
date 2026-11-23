@@ -519,4 +519,186 @@
             $logLines[0] | Should -Match 'Outcome=Failed'
         }
     }
+
+    Context 'Execução remota em lote (Operação 7)' {
+        BeforeEach {
+            $script:batchAllowListPath = Join-Path -Path 'TestDrive:\' -ChildPath ("get-jobs-batch-allow-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+            @(
+                'PC-REMOTO-01'
+                'PC-REMOTO-02'
+                'PC-REMOTO-03'
+                'SRV-PRINT-01|PrintServer'
+            ) | Set-Content -LiteralPath $script:batchAllowListPath -Encoding UTF8
+
+            $script:openedSessionTargets = New-Object -TypeName 'System.Collections.Generic.List[string]'
+            $script:closedSessionTargets = New-Object -TypeName 'System.Collections.Generic.List[string]'
+
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param([string]$ComputerName, [PSCredential]$Credential)
+                $script:openedSessionTargets.Add($ComputerName)
+                return [PSCustomObject]@{ ComputerName = $ComputerName; Id = $script:openedSessionTargets.Count }
+            }
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $targetHost = [string]$ArgumentList[0]
+                return @(
+                    [PSCustomObject]@{
+                        PSTypeName   = 'Deserialized.SpoolDoctor.PrintJob'
+                        Id           = 100
+                        PrinterName  = "HP-$targetHost"
+                        Document     = "Doc-$targetHost.pdf"
+                        SizeBytes    = 2048
+                        SubmittedAt  = (Get-Date).AddMinutes(-4)
+                        Age          = [timespan]::FromMinutes(4)
+                        Status       = 'Printing'
+                        ComputerName = $targetHost
+                    }
+                )
+            }
+            Mock Remove-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param($Session)
+                $script:closedSessionTargets.Add([string]$Session.ComputerName)
+            }
+        }
+
+        It 'executa lote 100% bem-sucedido em 3 máquinas retornando PrintJob com ComputerName correto e logs' {
+            $jobs = @(Get-SpoolerJob -ComputerName @('PC-REMOTO-01', 'pc-remoto-02', 'PC-REMOTO-03') -AllowedComputersPath $script:batchAllowListPath -LogPath $script:logPath)
+
+            $jobs.Count | Should -Be 3
+            foreach ($job in $jobs) {
+                $job.PSObject.TypeNames | Should -Contain 'SpoolDoctor.PrintJob'
+            }
+            $jobs[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $jobs[1].ComputerName | Should -Be 'PC-REMOTO-02'
+            $jobs[2].ComputerName | Should -Be 'PC-REMOTO-03'
+
+            $script:openedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 3
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=OK'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=OK'
+            $logLines[2] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'isola falhas Unreachable, allow-list, auth e entrada vazia via WriteError não terminativo e continua o lote' {
+            Mock New-SpoolerRemoteSession -ModuleName SpoolDoctor {
+                param([string]$ComputerName, [PSCredential]$Credential)
+                if ($ComputerName -eq 'SRV-PRINT-01') {
+                    throw (New-Object -TypeName System.UnauthorizedAccessException -ArgumentList 'Access is denied.')
+                }
+                $script:openedSessionTargets.Add($ComputerName)
+                return [PSCustomObject]@{ ComputerName = $ComputerName; Id = $script:openedSessionTargets.Count }
+            }
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $targetHost = [string]$ArgumentList[0]
+                if ($targetHost -eq 'PC-REMOTO-02') {
+                    throw (New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'WinRM unreachable.')
+                }
+                return @(
+                    [PSCustomObject]@{
+                        PSTypeName   = 'Deserialized.SpoolDoctor.PrintJob'
+                        Id           = 301
+                        PrinterName  = "HP-$targetHost"
+                        Document     = "Doc-$targetHost.pdf"
+                        SizeBytes    = 1024
+                        SubmittedAt  = (Get-Date).AddMinutes(-2)
+                        Age          = [timespan]::FromMinutes(2)
+                        Status       = 'Printing'
+                        ComputerName = $targetHost
+                    }
+                )
+            }
+
+            $batchErrors = @()
+            $jobs = @(Get-SpoolerJob -ComputerName @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-INTRUSO', '', 'SRV-PRINT-01', 'PC-REMOTO-03') -AllowedComputersPath $script:batchAllowListPath -LogPath $script:logPath -ErrorVariable batchErrors -ErrorAction Continue)
+            $reportedErrors = @($batchErrors | Where-Object { $_.FullyQualifiedErrorId -like 'SpoolDoctor.*' })
+
+            $jobs.Count | Should -Be 2
+            $jobs[0].ComputerName | Should -Be 'PC-REMOTO-01'
+            $jobs[1].ComputerName | Should -Be 'PC-REMOTO-03'
+
+            $reportedErrors.Count | Should -Be 4
+            $reportedErrors[0].TargetObject | Should -Be 'PC-REMOTO-02'
+            $reportedErrors[0].FullyQualifiedErrorId | Should -Match 'SpoolDoctor\.Unreachable'
+            $reportedErrors[0].CategoryInfo.Category | Should -Be ([System.Management.Automation.ErrorCategory]::ConnectionError)
+
+            $reportedErrors[1].TargetObject | Should -Be 'PC-INTRUSO'
+            $reportedErrors[1].FullyQualifiedErrorId | Should -Match 'SpoolDoctor\.Failed'
+
+            $reportedErrors[2].TargetObject | Should -Be '(inválido)'
+            $reportedErrors[2].FullyQualifiedErrorId | Should -Match 'SpoolDoctor\.Failed'
+
+            $reportedErrors[3].TargetObject | Should -Be 'SRV-PRINT-01'
+            $reportedErrors[3].FullyQualifiedErrorId | Should -Match 'SpoolDoctor\.Failed'
+
+            $script:openedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+            $script:closedSessionTargets.ToArray() | Should -Be @('PC-REMOTO-01', 'PC-REMOTO-02', 'PC-REMOTO-03')
+
+            $logLines = @(Get-Content -LiteralPath $script:logPath -Encoding UTF8)
+            $logLines.Count | Should -Be 6
+            $logLines[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=OK'
+            $logLines[1] | Should -Match 'Computer=PC-REMOTO-02.*Outcome=Unreachable'
+            $logLines[2] | Should -Match 'Computer=PC-INTRUSO.*Outcome=Failed'
+            $logLines[3] | Should -Match 'Computer=\(inválido\).*Outcome=Failed'
+            $logLines[4] | Should -Match 'Computer=SRV-PRINT-01.*Outcome=Failed'
+            $logLines[5] | Should -Match 'Computer=PC-REMOTO-03.*Outcome=OK'
+        }
+
+        It 'suporta lote misto, deduplicação, colapso de duplicata para 1 alvo falhando e @() vazio sob StrictMode' {
+            Mock Get-SpoolerPrinterRaw -ModuleName SpoolDoctor {
+                return @([PSCustomObject]@{ Name = 'HP Local' })
+            }
+            Mock Get-SpoolerJobRaw -ModuleName SpoolDoctor {
+                return @(
+                    [PSCustomObject]@{
+                        Id            = 15
+                        PrinterName   = 'HP Local'
+                        DocumentName  = 'Local.pdf'
+                        Size          = 512
+                        SubmittedTime = (Get-Date).AddMinutes(-1)
+                        JobStatus     = 'Printing'
+                        ComputerName  = $env:COMPUTERNAME
+                    }
+                )
+            }
+
+            $mixedJobs = @(& {
+                Set-StrictMode -Version Latest
+                Get-SpoolerJob -ComputerName @('localhost', $env:COMPUTERNAME, 'pc-remoto-01', 'PC-REMOTO-01') -AllowedComputersPath $script:batchAllowListPath -LogPath $script:logPath
+            })
+
+            $mixedJobs.Count | Should -Be 2
+            $mixedJobs[0].ComputerName | Should -Be $env:COMPUTERNAME
+            $mixedJobs[1].ComputerName | Should -Be 'PC-REMOTO-01'
+            Should -Invoke Get-SpoolerPrinterRaw -ModuleName SpoolDoctor -Times 1 -Exactly
+            Should -Invoke New-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
+
+            $collapseLog = Join-Path -Path 'TestDrive:\' -ChildPath ("get-jobs-collapse-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                throw (New-Object -TypeName System.Management.Automation.Remoting.PSRemotingTransportException -ArgumentList 'WinRM unreachable.')
+            }
+
+            {
+                Set-StrictMode -Version Latest
+                Get-SpoolerJob -ComputerName @('PC-REMOTO-01', 'pc-remoto-01') -AllowedComputersPath $script:batchAllowListPath -LogPath $collapseLog
+            } | Should -Throw '*PC-REMOTO-01*'
+
+            $collapseLogs = @(Get-Content -LiteralPath $collapseLog -Encoding UTF8)
+            $collapseLogs.Count | Should -Be 1
+            $collapseLogs[0] | Should -Match 'Computer=PC-REMOTO-01.*Outcome=Unreachable'
+
+            $emptyLog = Join-Path -Path 'TestDrive:\' -ChildPath ("get-jobs-empty-{0}.log" -f [guid]::NewGuid().ToString('N'))
+            {
+                Set-StrictMode -Version Latest
+                Get-SpoolerJob -ComputerName @() -AllowedComputersPath $script:batchAllowListPath -LogPath $emptyLog
+            } | Should -Throw
+
+            $emptyLogs = @(Get-Content -LiteralPath $emptyLog -Encoding UTF8)
+            $emptyLogs.Count | Should -Be 1
+            $emptyLogs[0] | Should -Match 'Computer=\(inválido\).*Outcome=Failed'
+        }
+    }
 }
