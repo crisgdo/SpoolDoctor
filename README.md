@@ -122,6 +122,8 @@ Reset-Spooler -ComputerName 'SRV-PRINT-01' -AllowPrintServer -Credential $cred
 
 ### Allow-list obrigatória (`config/allowed-computers.txt`)
 
+> **Guia prático:** veja o passo a passo completo de preparação de rede/WinRM, cadastro de máquinas e solução de problemas em [docs/uso-remoto.md](docs/uso-remoto.md).
+
 - A execução remota aceita **apenas** máquinas previamente cadastradas em `config/allowed-computers.txt` (um hostname ou FQDN por linha; linhas em branco e iniciadas por `#` são ignoradas).
 - Para marcar servidores de impressão, utilize a tag explícita:
   ```text
@@ -154,6 +156,8 @@ Reset-Spooler -ComputerName 'SRV-PRINT-01' -AllowPrintServer -Credential $cred
 SpoolDoctor/
 ├── config/
 │   └── allowed-computers.txt      # Allow-list de máquinas remotas e |PrintServer
+├── docs/
+│   └── uso-remoto.md              # Tutorial passo a passo de configuração e uso remoto
 ├── src/
 │   ├── SpoolDoctor.psd1           # Manifesto do módulo (v1.0.0)
 │   ├── SpoolDoctor.psm1           # Loader de Private, Remote e Public
