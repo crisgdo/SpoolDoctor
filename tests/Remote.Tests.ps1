@@ -713,10 +713,11 @@
             Should -Invoke Remove-SpoolerRemoteSession -ModuleName SpoolDoctor -Times 1 -Exactly
         }
 
-        It 'injeta Resolve-SpoolerTargetList em memória nas 4 operações remotas (<OperationName>)' -ForEach @(
+        It 'injeta Resolve-SpoolerTargetList em memória nas 5 operações remotas (<OperationName>)' -ForEach @(
             @{ OperationName = 'Get-SpoolerJob' }
             @{ OperationName = 'Remove-SpoolerJob' }
             @{ OperationName = 'Reset-Spooler' }
+            @{ OperationName = 'Restart-Spooler' }
             @{ OperationName = 'Test-Spooler' }
         ) {
             param($OperationName)
@@ -736,6 +737,34 @@
             $opResult.Success | Should -BeTrue
             $script:capturedOpDefs.Keys | Should -Contain 'Resolve-SpoolerTarget'
             $script:capturedOpDefs.Keys | Should -Contain 'Resolve-SpoolerTargetList'
+        }
+
+        It 'injeta Test-SpoolerPrintServer e wrappers de serviço para Restart-Spooler sem injetar manipulação de PRINTERS' {
+            $script:capturedRestartDefs = $null
+            Mock Invoke-SpoolerRemoteScript -ModuleName SpoolDoctor {
+                param($Session, $ScriptBlock, $ArgumentList)
+                $script:capturedRestartDefs = $ArgumentList[3]
+                return [PSCustomObject]@{
+                    PSTypeName   = 'Deserialized.SpoolDoctor.ActionResult'
+                    ComputerName = 'PC-REMOTO-01'
+                    Action       = 'Restart-Spooler'
+                    Outcome      = 'OK'
+                    Message      = 'OK'
+                    Timestamp    = Get-Date
+                }
+            }
+
+            $opResult = InModuleScope 'SpoolDoctor' {
+                Invoke-SpoolerRemoteOperation -ComputerName 'PC-REMOTO-01' -Operation 'Restart-Spooler' -Parameters @{ AllowPrintServer = $false }
+            }
+
+            $opResult.Success | Should -BeTrue
+            foreach ($expectedFn in @('Test-IsAdministrator', 'Get-SpoolerServiceStatus', 'Stop-SpoolerService', 'Start-SpoolerService', 'Get-SpoolerPrinterRaw', 'Test-SpoolerPrintServer', 'Restart-Spooler')) {
+                $script:capturedRestartDefs.Keys | Should -Contain $expectedFn
+            }
+            foreach ($forbiddenFileFn in @('Get-SpoolFile', 'Copy-SpoolFile', 'Remove-SpoolFile', 'Remove-OldSpoolBackup', 'Get-SpoolDirectoryPath', 'Test-SafeSpoolFilePath')) {
+                $script:capturedRestartDefs.Keys | Should -Not -Contain $forbiddenFileFn
+            }
         }
     }
 

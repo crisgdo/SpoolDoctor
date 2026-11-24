@@ -7,7 +7,7 @@
         [string]$ComputerName,
 
         [Parameter(Mandatory)]
-        [ValidateSet('Get-SpoolerJob', 'Remove-SpoolerJob', 'Reset-Spooler', 'Test-Spooler')]
+        [ValidateSet('Get-SpoolerJob', 'Remove-SpoolerJob', 'Reset-Spooler', 'Restart-Spooler', 'Test-Spooler')]
         [string]$Operation,
 
         [Parameter()]
@@ -57,6 +57,20 @@
                 'Get-SpoolerPrinterRaw',
                 'Test-SpoolerPrintServer',
                 'Reset-Spooler'
+            )
+        }
+        'Restart-Spooler' {
+            @(
+                'Test-ValidComputerName',
+                'Resolve-SpoolerTarget',
+                'Resolve-SpoolerTargetList',
+                'Test-IsAdministrator',
+                'Get-SpoolerServiceStatus',
+                'Stop-SpoolerService',
+                'Start-SpoolerService',
+                'Get-SpoolerPrinterRaw',
+                'Test-SpoolerPrintServer',
+                'Restart-Spooler'
             )
         }
         'Test-Spooler' {
@@ -169,6 +183,49 @@
                 }
 
                 return (Reset-Spooler @callParams)
+            }
+            'Restart-Spooler' {
+                if (-not (Test-IsAdministrator)) {
+                    return [PSCustomObject]@{
+                        PSTypeName   = 'SpoolDoctor.ActionResult'
+                        ComputerName = $TargetComputerName
+                        Action       = 'Restart-Spooler'
+                        Outcome      = 'Failed'
+                        Message      = "Permissão negada na máquina '$TargetComputerName': execute com credencial de Administrador no destino para reiniciar o serviço Spooler."
+                        Timestamp    = (Get-Date)
+                    }
+                }
+
+                $allowPrintServer = $OperationParameters.ContainsKey('AllowPrintServer') -and [bool]$OperationParameters['AllowPrintServer']
+                if (-not $allowPrintServer) {
+                    try {
+                        $printServerCheck = Test-SpoolerPrintServer
+                    }
+                    catch {
+                        return [PSCustomObject]@{
+                            PSTypeName   = 'SpoolDoctor.ActionResult'
+                            ComputerName = $TargetComputerName
+                            Action       = 'Restart-Spooler'
+                            Outcome      = 'Failed'
+                            Message      = "Reinício bloqueado na máquina '$TargetComputerName': não foi possível verificar se a máquina é servidor de impressão ($($_.Exception.Message))."
+                            Timestamp    = (Get-Date)
+                        }
+                    }
+
+                    if ($null -ne $printServerCheck -and [bool]$printServerCheck.IsPrintServer) {
+                        $reasonsText = @($printServerCheck.Reasons) -join '; '
+                        return [PSCustomObject]@{
+                            PSTypeName   = 'SpoolDoctor.ActionResult'
+                            ComputerName = $TargetComputerName
+                            Action       = 'Restart-Spooler'
+                            Outcome      = 'Failed'
+                            Message      = "Reinício bloqueado na máquina '$TargetComputerName' (servidor de impressão detectado: $reasonsText). Informe -AllowPrintServer para confirmar a execução."
+                            Timestamp    = (Get-Date)
+                        }
+                    }
+                }
+
+                return (Restart-Spooler -Confirm:$false)
             }
             'Test-Spooler' {
                 $callParams = @{}

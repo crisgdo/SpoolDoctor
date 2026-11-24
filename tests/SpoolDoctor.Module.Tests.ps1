@@ -22,6 +22,7 @@
         $manifest | Should -Not -BeNullOrEmpty
         $manifest.Name | Should -Be 'SpoolDoctor'
         $manifest.RootModule | Should -Be 'SpoolDoctor.psm1'
+        $manifest.Version | Should -Be ([version]'1.1.0')
         $manifest.PowerShellVersion | Should -Be ([version]'5.1')
     }
 
@@ -30,9 +31,10 @@
 
         $module = Get-Module -Name 'SpoolDoctor'
         $module | Should -Not -BeNullOrEmpty
-        $module.ExportedFunctions.Count | Should -Be 5
+        $module.ExportedFunctions.Count | Should -Be 6
         $module.ExportedFunctions.Keys | Should -Contain 'Get-SpoolerAllowedComputer'
         $module.ExportedFunctions.Keys | Should -Contain 'Reset-Spooler'
+        $module.ExportedFunctions.Keys | Should -Contain 'Restart-Spooler'
         $module.ExportedFunctions.Keys | Should -Contain 'Get-SpoolerJob'
         $module.ExportedFunctions.Keys | Should -Contain 'Remove-SpoolerJob'
         $module.ExportedFunctions.Keys | Should -Contain 'Test-Spooler'

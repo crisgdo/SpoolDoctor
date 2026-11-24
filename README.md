@@ -1,4 +1,4 @@
-# SpoolDoctor (`v1.0.0`)
+# SpoolDoctor (`v1.1.0`)
 
 Ferramenta em PowerShell para diagnosticar e limpar a fila de impressão do Windows, local e remotamente, com segurança, verificação pós-ação e trilha de auditoria.
 
@@ -7,7 +7,8 @@ Ferramenta em PowerShell para diagnosticar e limpar a fila de impressão do Wind
 Quando a fila de impressão trava, reiniciar o spooler às cegas apaga tudo sem informar o que falhou, sem salvar cópia dos arquivos e sem gerar histórico. O **SpoolDoctor** substitui esse processo por um fluxo seguro e auditável:
 
 - **Diagnóstico preventivo (`Test-Spooler`):** verifica estado do serviço `Spooler`, impressoras em alerta/offline, jobs travados por idade ou status e arquivos `.SPL`/`.SHD` órfãos.
-- **Cancelamento seletivo (`Remove-SpoolerJob`):** tenta remover apenas o job problemático antes de recorrer ao reset completo.
+- **Cancelamento seletivo (`Remove-SpoolerJob`):** tenta remover apenas o job problemático antes de mexer no serviço.
+- **Reinício seguro do serviço (`Restart-Spooler`):** inicia ou reinicia o serviço `Spooler` **sem apagar** os arquivos `.SPL`/`.SHD` da fila e confirma que o serviço terminou em execução (`Running`).
 - **Reset verificado com backup (`Reset-Spooler`):** faz backup prévio dos arquivos `.SPL`/`.SHD` com retenção automática, reinicia o serviço mesmo em falha (`finally`) e só reporta sucesso após confirmar serviço em execução e fila vazia.
 - **Simulação (`-WhatIf`) e auditoria:** toda operação (incluindo simulações e recusas) registra log estruturado.
 - **Interface gráfica (`Iniciar.bat`) e operação remota via WinRM:** elevação automática via UAC, seleção de máquinas autorizadas (allow-list), suporte a lote e proteção contra reset acidental em servidores de impressão.
@@ -29,18 +30,19 @@ Quando a fila de impressão trava, reiniciar o spooler às cegas apaga tudo sem 
 
 1. Dê duplo clique em **`Iniciar.bat`**.
 2. A interface solicita elevação automática via UAC (com trava anti-loop para não abrir janelas duplicadas).
-3. Se você recusar o UAC, a janela abre em **modo somente leitura local** e exibe o botão **Reiniciar como Administrador**. Mesmo sem UAC local, alvos **remotos** habilitam **Cancelar job selecionado** e **Resetar Spooler**, pois o privilégio de administrador é validado no destino via WinRM.
+3. Se você recusar o UAC, a janela abre em **modo somente leitura local** e exibe o botão **Reiniciar como Administrador**. Mesmo sem UAC local, alvos **remotos** habilitam **Cancelar job selecionado**, **Reiniciar serviço** e **Limpar fila (Resetar)**, pois o privilégio de administrador é validado no destino via WinRM.
 
 ### Controles da janela
 
 - **Seletor `Máquina`:** inicia em `Local (<COMPUTERNAME>)`. Lista as máquinas da allow-list (`config/allowed-computers.txt`), marcando servidores de impressão como `<HOSTNAME> [Servidor de Impressão]`. Quando há 2 ou mais máquinas cadastradas, exibe também **`Todas autorizadas (N máquinas)`** para consulta/operação em lote.
 - **`Impressora (opcional)` e `Atualizar`:** filtra a lista de jobs pelo nome da impressora na máquina ou lote selecionado. A grade mostra a coluna **`Máquina`** para identificar a origem de cada job.
 - **`Usar credencial alternativa`:** disponível apenas para alvos remotos. Solicita usuário/senha via `Get-Credential` e mantém a credencial **somente em memória** enquanto marcada e até fechar a janela (nunca é gravada em arquivo ou log).
-- **`Modo simulação (-WhatIf)`:** simula cancelamento ou reset sem alterar o sistema, exibindo e registrando `Simulated`.
-- **`Fazer backup antes de resetar`:** ligado por padrão; desmarque apenas se quiser acionar `-SkipBackup`.
+- **`Modo simulação (-WhatIf)`:** simula cancelamento, reinício ou reset sem alterar o sistema, exibindo e registrando `Simulated`.
+- **`Fazer backup antes de resetar`:** ligado por padrão; aplicado apenas em **Limpar fila (Resetar)** (desmarque apenas se quiser acionar `-SkipBackup`; **Reiniciar serviço** ignora esta opção pois não remove arquivos).
 - **`Diagnosticar`:** executa `Test-Spooler` na máquina local, remota ou em todo o lote e exibe o resumo no painel de status.
 - **`Cancelar job selecionado`:** cancela o job marcado na grade, direcionando automaticamente para a máquina exata do job e exibindo o hostname na confirmação.
-- **`Resetar Spooler`:** exibe confirmação explícita com a máquina de destino. Em servidores marcados com `|PrintServer`, exige **confirmação reforçada em 2 etapas**; no modo lote, servidores `|PrintServer` são bloqueados automaticamente para evitar quedas acidentais de impressão coletiva.
+- **`Reiniciar serviço`:** executa `Restart-Spooler` na máquina local, remota ou em lote **preservando os arquivos da fila**. Após execução real com sucesso, atualiza a grade automaticamente mantendo a mensagem de retorno no painel de status. Em servidores marcados com `|PrintServer`, exige **confirmação reforçada em 2 etapas**; no modo lote, servidores `|PrintServer` são bloqueados automaticamente.
+- **`Limpar fila (Resetar)`:** executa `Reset-Spooler` exibindo confirmação explícita com a máquina de destino. Em servidores marcados com `|PrintServer`, exige **confirmação reforçada em 2 etapas**; no modo lote, servidores `|PrintServer` são bloqueados automaticamente para evitar quedas acidentais de impressão coletiva.
 
 ---
 
@@ -59,6 +61,7 @@ Import-Module .\src\SpoolDoctor.psd1
 | `Test-Spooler` | Diagnostica serviço, impressoras em erro, jobs travados e arquivos órfãos. | Não (somente leitura) |
 | `Get-SpoolerJob` | Lista jobs da fila com tamanho, idade e status. | Não (somente leitura) |
 | `Remove-SpoolerJob` | Cancela um job específico com verificação pós-remoção. | Sim (`SupportsShouldProcess`) |
+| `Restart-Spooler` | Inicia ou reinicia o `Spooler` sem apagar a fila e verifica `Running`. | Sim (`SupportsShouldProcess`) |
 | `Reset-Spooler` | Para o `Spooler`, faz backup, limpa `.SPL`/`.SHD`, reinicia e verifica. | Sim (`SupportsShouldProcess`) |
 | `Get-SpoolerAllowedComputer` | Lê a allow-list (`config/allowed-computers.txt`) sem alterar nada. | Não (somente leitura) |
 
@@ -82,6 +85,16 @@ Get-SpoolerJob | Where-Object { $_.Id -eq 42 } | Remove-SpoolerJob -WhatIf
 
 # Cancelar um job informando impressora e ID diretamente (como Administrador)
 Remove-SpoolerJob -PrinterName 'HP LaserJet' -Id 42
+```
+
+**Reinício seguro do serviço (`Restart-Spooler`, preserva os documentos da fila):**
+
+```powershell
+# Simular reinício local sem alterar o serviço
+Restart-Spooler -WhatIf
+
+# Iniciar ou reiniciar o serviço Spooler mantendo a fila intacta (como Administrador)
+Restart-Spooler
 ```
 
 **Reset seguro (`-WhatIf`, backup padrão com retenção e `-SkipBackup`):**
@@ -110,9 +123,11 @@ Get-SpoolerJob -ComputerName 'PC-FINANCEIRO-01'
 # Execução em lote usando credencial alternativa em memória
 $cred = Get-Credential
 Test-Spooler -ComputerName @('PC-FINANCEIRO-01', 'ESTACAO-ATENDIMENTO-02.empresa.local') -Credential $cred
+Restart-Spooler -ComputerName @('PC-FINANCEIRO-01', 'ESTACAO-ATENDIMENTO-02.empresa.local') -Credential $cred -WhatIf
 Reset-Spooler -ComputerName @('PC-FINANCEIRO-01', 'ESTACAO-ATENDIMENTO-02.empresa.local') -Credential $cred -WhatIf
 
-# Reset em servidor de impressão exige liberação explícita (-AllowPrintServer) e confirmação
+# Reinício ou reset em servidor de impressão exige liberação explícita (-AllowPrintServer) e confirmação
+Restart-Spooler -ComputerName 'SRV-PRINT-01' -AllowPrintServer -Credential $cred
 Reset-Spooler -ComputerName 'SRV-PRINT-01' -AllowPrintServer -Credential $cred
 ```
 
@@ -159,9 +174,9 @@ SpoolDoctor/
 ├── docs/
 │   └── uso-remoto.md              # Tutorial passo a passo de configuração e uso remoto
 ├── src/
-│   ├── SpoolDoctor.psd1           # Manifesto do módulo (v1.0.0)
+│   ├── SpoolDoctor.psd1           # Manifesto do módulo (v1.1.0)
 │   ├── SpoolDoctor.psm1           # Loader de Private, Remote e Public
-│   ├── Public/                    # 5 funções exportadas (CLI e consumidas pela UI)
+│   ├── Public/                    # 6 funções exportadas (CLI e consumidas pela UI)
 │   ├── Private/                   # Wrappers de sistema, log, backup e validação de caminho
 │   └── Remote/                    # Validação de alvo, allow-list e despacho WinRM
 ├── ui/

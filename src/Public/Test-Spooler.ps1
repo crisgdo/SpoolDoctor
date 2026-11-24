@@ -350,7 +350,7 @@
                 if ($serviceStatus -ne 'Running' -or $hasOrphanSpoolFiles) {
                     $health = 'Critical'
                     if ($serviceStatus -ne 'Running') {
-                        $recommendation = "O serviço Spooler está '$serviceStatus'. Execute Reset-Spooler para reiniciar o serviço e limpar a fila."
+                        $recommendation = "O serviço Spooler está '$serviceStatus'. Tente iniciar/reiniciar primeiro com Restart-Spooler (preservando os documentos da fila); se o problema persistir, execute Reset-Spooler."
                     }
                     else {
                         $recommendation = 'Há arquivos órfãos (.SPL/.SHD) na pasta PRINTERS sem jobs na fila. Execute Reset-Spooler para limpar a fila com segurança.'
