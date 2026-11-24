@@ -591,6 +591,7 @@ function Sync-SpoolDoctorTargetState {
     $isRemote = [bool]$selectedTarget.IsRemote
 
     $ui.CredentialCheckBox.Enabled = $isRemote
+    $ui.RestartButton.Enabled = ($isElevated -or $isRemote)
     $ui.ResetButton.Enabled = ($isElevated -or $isRemote)
 
     if ($isElevated) {
@@ -667,6 +668,7 @@ function Sync-SpoolDoctorBusyState {
         $ui.RefreshButton.Enabled = $false
         $ui.DiagnoseButton.Enabled = $false
         $ui.CancelButton.Enabled = $false
+        $ui.RestartButton.Enabled = $false
         $ui.ResetButton.Enabled = $false
         $ui.ElevateButton.Enabled = $false
         $Form.UseWaitCursor = $true
@@ -931,6 +933,135 @@ function Invoke-SpoolDoctorCancelJob {
     catch {
         $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
         Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] [ERRO] Falha ao cancelar o job ${jobId}: $($_.Exception.Message)"
+    }
+    finally {
+        Sync-SpoolDoctorBusyState -Form $Form -IsBusy $false
+    }
+}
+
+function Invoke-SpoolDoctorRestart {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [System.Windows.Forms.Form]$Form
+    )
+
+    $ui = $Form.Tag
+    $selectedTarget = Get-SpoolDoctorSelectedTarget -Form $Form
+    $isWhatIf = [bool]$ui.WhatIfCheckBox.Checked
+    $whatIfNotice = if ($isWhatIf) {
+        "`r`n`r`nMODO SIMULAÇÃO (-WhatIf) ATIVO: nenhuma alteração real será feita."
+    }
+    else {
+        ''
+    }
+
+    $allowPrintServer = $false
+    if (-not $selectedTarget.IsBatch -and $selectedTarget.IsPrintServer) {
+        $printServerHost = [string]$selectedTarget.ComputerNames[0]
+        $firstMessage = (
+            "ATENÇÃO [SERVIDOR DE IMPRESSÃO]: a máquina '$printServerHost' está marcada como servidor de impressão (|PrintServer).`r`n" +
+            "Reiniciar o serviço Spooler irá interromper temporariamente a impressão de TODOS os usuários conectados a este servidor (os arquivos da fila serão preservados)." +
+            "`r`n`r`nDeseja prosseguir para a confirmação final?" +
+            $whatIfNotice
+        )
+        $firstConfirmed = Confirm-SpoolDoctorAction -Title 'Confirmar reinício em Servidor de Impressão' -Message $firstMessage -Icon 'Warning'
+        if (-not $firstConfirmed) {
+            $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+            Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] Reinício do serviço Spooler cancelado pelo usuário na máquina '$printServerHost'."
+            return
+        }
+
+        $secondMessage = (
+            "CONFIRMAÇÃO REFORÇADA (-AllowPrintServer):`r`n`r`n" +
+            "Confirma o reinício do serviço Spooler (preservando os arquivos da fila) no servidor de impressão '$printServerHost'?" +
+            $whatIfNotice
+        )
+        $secondConfirmed = Confirm-SpoolDoctorAction -Title 'Confirmação reforçada - Servidor de Impressão' -Message $secondMessage -Icon 'Error'
+        if (-not $secondConfirmed) {
+            $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+            Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] Confirmação reforçada recusada pelo usuário para o servidor de impressão '$printServerHost'."
+            return
+        }
+
+        $allowPrintServer = $true
+    }
+    else {
+        $targetDescription = if ($selectedTarget.IsBatch) {
+            "nas $($selectedTarget.ComputerNames.Count) máquinas autorizadas ($($selectedTarget.ComputerNames -join ', '))"
+        }
+        elseif ($selectedTarget.IsRemote) {
+            "na máquina '$($selectedTarget.ComputerNames[0])'"
+        }
+        else {
+            "na máquina '$($ui.ComputerName)'"
+        }
+
+        $batchPrintServerNotice = ''
+        if ($selectedTarget.IsBatch -and $selectedTarget.PrintServerNames.Count -gt 0) {
+            $batchPrintServerNotice = "`r`nObservação: servidor(es) de impressão marcado(s) com |PrintServer ($($selectedTarget.PrintServerNames -join ', ')) serão bloqueados automaticamente no modo lote (selecione-os individualmente caso deseje reiniciar)."
+        }
+
+        $confirmMessage = (
+            "Esta ação irá reiniciar ou iniciar o serviço Spooler $targetDescription, preservando os arquivos .SPL e .SHD da fila.`r`n" +
+            $batchPrintServerNotice +
+            "`r`nDeseja continuar?" +
+            $whatIfNotice
+        )
+
+        $confirmed = Confirm-SpoolDoctorAction -Title 'Confirmar reinício do serviço Spooler' -Message $confirmMessage -Icon 'Warning'
+        if (-not $confirmed) {
+            $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+            Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] Reinício do serviço Spooler cancelado pelo usuário ($($selectedTarget.DisplayText))."
+            return
+        }
+    }
+
+    Sync-SpoolDoctorBusyState -Form $Form -IsBusy $true
+
+    try {
+        $actionParams = Get-SpoolDoctorRemoteParameter -Form $Form -ComputerNames $selectedTarget.ComputerNames
+        $actionParams['ErrorAction'] = 'Stop'
+        if (-not [string]::IsNullOrWhiteSpace($ui.LogPath)) {
+            $actionParams['LogPath'] = $ui.LogPath
+        }
+        if ($allowPrintServer) {
+            $actionParams['AllowPrintServer'] = $true
+        }
+        if ($isWhatIf) {
+            $actionParams['WhatIf'] = $true
+        }
+        else {
+            $actionParams['Confirm'] = $false
+        }
+
+        $results = @(Restart-Spooler @actionParams | Where-Object { $null -ne $_ })
+        if ($results.Count -gt 0) {
+            $formattedLines = @(
+                foreach ($res in $results) {
+                    Format-SpoolerActionResult -Result $res
+                }
+            )
+            Write-SpoolDoctorStatusText -Form $Form -Text ($formattedLines -join "`r`n")
+
+            $hasSuccessOutcome = $false
+            foreach ($res in $results) {
+                $outcome = [string](Get-SpoolDoctorPropertyValue -InputObject $res -PropertyName 'Outcome' -DefaultValue '')
+                if ($outcome -eq 'OK') {
+                    $hasSuccessOutcome = $true
+                    break
+                }
+            }
+
+            if (-not $isWhatIf -and $hasSuccessOutcome) {
+                Invoke-SpoolDoctorRefresh -Form $Form -PreserveStatus
+            }
+        }
+    }
+    catch {
+        $nowText = (Get-Date).ToString('dd/MM/yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-SpoolDoctorStatusText -Form $Form -Text "[$nowText] [ERRO] Falha ao reiniciar o serviço Spooler: $($_.Exception.Message)"
     }
     finally {
         Sync-SpoolDoctorBusyState -Form $Form -IsBusy $false
@@ -1378,14 +1509,21 @@ function Initialize-SpoolDoctorForm {
     $cancelButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
     $cancelButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 10, 4)
 
+    $restartButton = New-Object -TypeName System.Windows.Forms.Button
+    $restartButton.Text = 'Reiniciar serviço'
+    $restartButton.AutoSize = $true
+    $restartButton.Enabled = $isElevated
+    $restartButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
+    $restartButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 10, 4)
+
     $resetButton = New-Object -TypeName System.Windows.Forms.Button
-    $resetButton.Text = 'Resetar Spooler'
+    $resetButton.Text = 'Limpar fila (Resetar)'
     $resetButton.AutoSize = $true
     $resetButton.Enabled = $isElevated
     $resetButton.Padding = New-Object -TypeName System.Windows.Forms.Padding(10, 2, 10, 2)
     $resetButton.Margin = New-Object -TypeName System.Windows.Forms.Padding(0, 2, 0, 4)
 
-    $actionPanel.Controls.AddRange(@($whatIfCheckBox, $backupCheckBox, $diagnoseButton, $cancelButton, $resetButton))
+    $actionPanel.Controls.AddRange(@($whatIfCheckBox, $backupCheckBox, $diagnoseButton, $cancelButton, $restartButton, $resetButton))
 
     $statusGroup = New-Object -TypeName System.Windows.Forms.GroupBox
     $statusGroup.Text = 'Status e retorno das ações'
@@ -1521,6 +1659,7 @@ function Initialize-SpoolDoctorForm {
         BackupCheckBox             = $backupCheckBox
         DiagnoseButton             = $diagnoseButton
         CancelButton               = $cancelButton
+        RestartButton              = $restartButton
         ResetButton                = $resetButton
         StatusTextBox              = $statusTextBox
     }
@@ -1572,6 +1711,12 @@ function Initialize-SpoolDoctorForm {
         $owner = $this.FindForm()
         if ($null -ne $owner) {
             Invoke-SpoolDoctorCancelJob -Form $owner
+        }
+    })
+    $restartButton.Add_Click({
+        $owner = $this.FindForm()
+        if ($null -ne $owner) {
+            Invoke-SpoolDoctorRestart -Form $owner
         }
     })
     $resetButton.Add_Click({

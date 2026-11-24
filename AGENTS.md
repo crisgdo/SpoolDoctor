@@ -26,7 +26,7 @@ Ferramenta em PowerShell para diagnosticar e limpar a fila de impressão do Wind
 
 ## Estrutura
 
-- `src/Public`: funções exportadas (`Get-SpoolerAllowedComputer`, `Get-SpoolerJob`, `Remove-SpoolerJob`, `Reset-Spooler`, `Test-Spooler`).
+- `src/Public`: funções exportadas (`Get-SpoolerAllowedComputer`, `Get-SpoolerJob`, `Remove-SpoolerJob`, `Reset-Spooler`, `Restart-Spooler`, `Test-Spooler`).
 - `src/Private`: wrappers finos do sistema, log, backup, validação de caminho. **Só aqui se toca o sistema.** Wrappers têm nome próprio (ex.: `Get-SpoolerJobRaw`), nunca o nome de um cmdlet nativo.
 - `src/Remote`: despacho remoto e leitura da allow-list.
 - `ui/`: interface WinForms, camada fina sem lógica de negócio.
@@ -70,6 +70,7 @@ O CI (`.github/workflows/ci.yml`, `windows-latest`) roda os mesmos comandos e fa
 - Execução sem privilégio de administrador é recusada antes de tocar no sistema e registrada em log.
 - Remoto: máquina fora da allow-list é recusada; máquina inacessível gera `Unreachable` e as demais continuam.
 - Servidor de impressão sem confirmação reforçada é bloqueado.
+- `Restart-Spooler` nunca chama wrappers de leitura, cópia ou remoção em `PRINTERS` (`Get-SpoolFile`, `Copy-SpoolFile`, `Remove-SpoolFile`, `Remove-OldSpoolBackup`) e verifica status final `Running`.
 
 ## Higiene de contexto
 

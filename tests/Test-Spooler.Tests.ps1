@@ -79,7 +79,10 @@
         $diag.Health | Should -Be 'Critical'
         $diag.IsHealthy | Should -BeFalse
         ($diag.Issues -join ' ') | Should -Match 'Stopped'
+        $diag.Recommendation | Should -Match 'Restart-Spooler'
+        $diag.Recommendation | Should -Match 'preserv'
         $diag.Recommendation | Should -Match 'Reset-Spooler'
+        $diag.Recommendation.IndexOf('Restart-Spooler') | Should -BeLessThan ($diag.Recommendation.IndexOf('Reset-Spooler'))
 
         Should -Invoke Get-SpoolerPrinterRaw -ModuleName SpoolDoctor -Times 0 -Exactly
         Should -Invoke Get-SpoolerJobRaw -ModuleName SpoolDoctor -Times 0 -Exactly

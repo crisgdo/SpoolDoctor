@@ -72,6 +72,18 @@
                 }
             }
         }
+        if (Get-Command -Name 'Restart-Spooler' -ErrorAction SilentlyContinue) {
+            Mock Restart-Spooler {
+                return [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.ActionResult'
+                    ComputerName = $env:COMPUTERNAME
+                    Action       = 'Restart-Spooler'
+                    Outcome      = 'OK'
+                    Message      = 'Serviço Spooler reiniciado sem apagar a fila.'
+                    Timestamp    = Get-Date
+                }
+            }
+        }
         if (Get-Command -Name 'Confirm-SpoolDoctorAction' -ErrorAction SilentlyContinue) {
             Mock Confirm-SpoolDoctorAction { return $false }
         }
@@ -170,6 +182,7 @@
             'Remove-PrintJob',
             'Get-Printer',
             'Get-Service',
+            'Restart-Service',
             'Invoke-Command',
             'New-PSSession',
             'Remove-PSSession',
@@ -183,6 +196,7 @@
         $commandNames | Should -Contain 'Get-SpoolerAllowedComputer'
         $commandNames | Should -Contain 'Get-SpoolerJob'
         $commandNames | Should -Contain 'Remove-SpoolerJob'
+        $commandNames | Should -Contain 'Restart-Spooler'
         $commandNames | Should -Contain 'Reset-Spooler'
         $commandNames | Should -Contain 'Test-Spooler'
     }
@@ -238,6 +252,7 @@
             $ui.BackupCheckBox | Should -BeOfType [System.Windows.Forms.CheckBox]
             $ui.DiagnoseButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.CancelButton | Should -BeOfType [System.Windows.Forms.Button]
+            $ui.RestartButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.ResetButton | Should -BeOfType [System.Windows.Forms.Button]
             $ui.StatusTextBox | Should -BeOfType [System.Windows.Forms.TextBox]
 
@@ -256,7 +271,10 @@
             $ui.RefreshButton.Enabled | Should -BeTrue
             $ui.DiagnoseButton.Enabled | Should -BeTrue
             $ui.DiagnoseButton.Text | Should -Match 'Diagnosticar'
+            $ui.RestartButton.Enabled | Should -BeTrue
+            $ui.RestartButton.Text | Should -Be 'Reiniciar serviço'
             $ui.ResetButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Text | Should -Be 'Limpar fila (Resetar)'
             $ui.WhatIfCheckBox.Checked | Should -BeFalse
             $ui.BackupCheckBox.Checked | Should -BeTrue
             $ui.BackupCheckBox.Text | Should -Match 'backup'
@@ -1104,6 +1122,7 @@
             $ui.PrivilegeLabel.Text | Should -Match 'Usuário padrão'
             (Get-SpoolDoctorControlVisibleFlag -Control $ui.ElevateButton) | Should -BeTrue
             $ui.ElevateButton.Enabled | Should -BeTrue
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
             $ui.CancelButton.Enabled | Should -BeFalse
             $ui.StatusTextBox.Text | Should -Match 'Sessão em modo somente leitura\.'
@@ -1116,6 +1135,7 @@
             Sync-SpoolDoctorSelectionState -Form $form
 
             $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
             $ui.RefreshButton.Enabled | Should -BeTrue
             $ui.DiagnoseButton.Enabled | Should -BeTrue
@@ -1124,6 +1144,7 @@
             Invoke-SpoolDoctorDiagnose -Form $form
             Should -Invoke Test-Spooler -Times 1 -Exactly
             $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
             $ui.RefreshButton.Enabled | Should -BeTrue
             $ui.DiagnoseButton.Enabled | Should -BeTrue
@@ -1631,6 +1652,7 @@
             # Modo local sem UAC: somente leitura
             $ui.PrivilegeLabel.Text | Should -Match 'Usuário padrão'
             $ui.PrivilegeLabel.Text | Should -Match 'somente leitura'
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
             $ui.CancelButton.Enabled | Should -BeFalse
 
@@ -1638,12 +1660,14 @@
             $ui.Grid.Rows[0].Selected = $true
             Sync-SpoolDoctorSelectionState -Form $form
             $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
 
-            # Muda para alvo remoto: habilita Resetar e Cancelar (com job remoto selecionado)
+            # Muda para alvo remoto: habilita Reiniciar, Resetar e Cancelar (com job remoto selecionado)
             $ui.TargetComboBox.SelectedIndex = 1
             $ui.PrivilegeLabel.Text | Should -Match 'Usuário padrão'
             $ui.PrivilegeLabel.Text | Should -Match 'destino'
+            $ui.RestartButton.Enabled | Should -BeTrue
             $ui.ResetButton.Enabled | Should -BeTrue
             $ui.CancelButton.Enabled | Should -BeFalse
 
@@ -1651,15 +1675,18 @@
             $ui.Grid.Rows[0].Selected = $true
             Sync-SpoolDoctorSelectionState -Form $form
             $ui.CancelButton.Enabled | Should -BeTrue
+            $ui.RestartButton.Enabled | Should -BeTrue
             $ui.ResetButton.Enabled | Should -BeTrue
 
-            # Volta para alvo local e carrega fila local: volta a bloquear Cancelar e Resetar
+            # Volta para alvo local e carrega fila local: volta a bloquear Cancelar, Reiniciar e Resetar
             $ui.TargetComboBox.SelectedIndex = 0
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
             Invoke-SpoolDoctorRefresh -Form $form
             $ui.Grid.Rows[0].Selected = $true
             Sync-SpoolDoctorSelectionState -Form $form
             $ui.CancelButton.Enabled | Should -BeFalse
+            $ui.RestartButton.Enabled | Should -BeFalse
             $ui.ResetButton.Enabled | Should -BeFalse
         }
         finally {
@@ -1925,5 +1952,293 @@
 
         $allowIdx | Should -BeGreaterThan $fileIdx
         $args[$allowIdx + 1] | Should -Be ('"{0}"' -f $spaceAllowPath)
+    }
+
+    It 'não chama Restart-Spooler quando usuário recusa a confirmação mostrando o hostname' {
+        $script:capturedRestartConfirmMsg = $null
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedRestartConfirmMsg = $Message
+            return $false
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+
+            Invoke-SpoolDoctorRestart -Form $form
+
+            Should -Invoke Restart-Spooler -Times 0 -Exactly
+            $script:capturedRestartConfirmMsg | Should -Match ([regex]::Escape($env:COMPUTERNAME))
+            $script:capturedRestartConfirmMsg | Should -Match 'preserv'
+            $ui.StatusTextBox.Text | Should -Match 'cancelad'
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.RestartButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeTrue
+            $form.UseWaitCursor | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'chama Restart-Spooler -WhatIf ignorando BackupCheckBox e sem disparar refresh automático' {
+        $script:capturedRestartSimConfirmMsg = $null
+        $script:capturedRestartSimArgs = $null
+        $script:capturedRestartSimWhatIf = $false
+
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedRestartSimConfirmMsg = $Message
+            return $true
+        }
+        Mock Restart-Spooler {
+            param([string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:capturedRestartSimArgs = @{} + $PSBoundParameters
+            $script:capturedRestartSimWhatIf = [bool]$WhatIfPreference
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = $env:COMPUTERNAME
+                Action       = 'Restart-Spooler'
+                Outcome      = 'Simulated'
+                Message      = 'Simulação (-WhatIf): reinício simulado.'
+                Timestamp    = Get-Date
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.WhatIfCheckBox.Checked = $true
+            $ui.BackupCheckBox.Checked = $false
+
+            Invoke-SpoolDoctorRestart -Form $form
+
+            Should -Invoke Restart-Spooler -Times 1 -Exactly
+            Should -Invoke Get-SpoolerJob -Times 0 -Exactly
+            $script:capturedRestartSimConfirmMsg | Should -Match ([regex]::Escape($env:COMPUTERNAME))
+            $script:capturedRestartSimConfirmMsg | Should -Match 'simula|-WhatIf'
+            $script:capturedRestartSimArgs.ContainsKey('SkipBackup') | Should -BeFalse
+            $script:capturedRestartSimArgs['LogPath'] | Should -Be $script:logPath
+            $script:capturedRestartSimWhatIf | Should -BeTrue
+            $ui.StatusTextBox.Text | Should -Match '\[Simulated\]'
+            $ui.StatusTextBox.Text | Should -Match '\(Restart-Spooler\)'
+            $ui.RefreshButton.Enabled | Should -BeTrue
+            $ui.RestartButton.Enabled | Should -BeTrue
+            $ui.ResetButton.Enabled | Should -BeTrue
+            $form.UseWaitCursor | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'após execução real de Restart-Spooler com OK atualiza a grade automaticamente preservando a mensagem de status' {
+        $script:capturedRestartRealArgs = $null
+        $script:capturedRestartRealConfirmPref = $null
+        $script:capturedRestartRealWhatIf = $false
+
+        Mock Confirm-SpoolDoctorAction { return $true }
+        Mock Restart-Spooler {
+            param([string]$LogPath)
+            $script:capturedRestartRealArgs = @{} + $PSBoundParameters
+            $script:capturedRestartRealConfirmPref = "$ConfirmPreference"
+            $script:capturedRestartRealWhatIf = [bool]$WhatIfPreference
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = $env:COMPUTERNAME
+                Action       = 'Restart-Spooler'
+                Outcome      = 'OK'
+                Message      = "Spooler reiniciado com sucesso na máquina '$($env:COMPUTERNAME)'. Arquivos da fila preservados."
+                Timestamp    = [datetime]'2026-11-24T19:00:00'
+            }
+        }
+        Mock Get-SpoolerJob {
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.PrintJob'
+                    Id           = 88
+                    PrinterName  = 'HP LaserJet'
+                    Document     = 'Recarregado.pdf'
+                    SizeBytes    = 2048L
+                    SubmittedAt  = [datetime]'2026-11-24T18:55:00'
+                    Age          = [timespan]::FromMinutes(5)
+                    Status       = 'Printing'
+                    ComputerName = $env:COMPUTERNAME
+                }
+            )
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.WhatIfCheckBox.Checked = $false
+            $ui.BackupCheckBox.Checked = $false
+
+            Invoke-SpoolDoctorRestart -Form $form
+
+            Should -Invoke Restart-Spooler -Times 1 -Exactly
+            Should -Invoke Get-SpoolerJob -Times 1 -Exactly
+            $script:capturedRestartRealWhatIf | Should -BeFalse
+            $script:capturedRestartRealConfirmPref | Should -Be 'None'
+            $script:capturedRestartRealArgs.ContainsKey('SkipBackup') | Should -BeFalse
+            $script:capturedRestartRealArgs['LogPath'] | Should -Be $script:logPath
+
+            $ui.Grid.Rows.Count | Should -Be 1
+            $ui.Grid.Rows[0].Cells['Id'].Value | Should -Be 88
+            $ui.Grid.Rows[0].Cells['Document'].Value | Should -Be 'Recarregado.pdf'
+
+            $ui.StatusTextBox.Text | Should -Match '\[OK\] \(Restart-Spooler\)'
+            $ui.StatusTextBox.Text | Should -Match 'Arquivos da fila preservados'
+            $ui.StatusTextBox.Text | Should -Not -Match 'Fila atualizada'
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'exige confirmação reforçada em 2 etapas para Reiniciar serviço em servidor de impressão (|PrintServer) e repassa -Credential apenas para remoto' {
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'SRV-PRINT-01'; IsPrintServer = $true }
+            )
+        }
+
+        $securePwd = ConvertTo-SecureString -String 'SegredoRestart99!' -AsPlainText -Force
+        $fakeCred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList @('DOMINIO\operador_restart', $securePwd)
+        Mock Request-SpoolDoctorCredential { return $fakeCred }
+
+        $script:psRestartConfirmMessages = New-Object -TypeName 'System.Collections.Generic.List[string]'
+        $script:psRestartScenario = 'RejectFirst'
+        $script:capturedPsRestartBound = $null
+        $script:capturedPsRestartWhatIf = $false
+
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:psRestartConfirmMessages.Add($Message)
+            switch ($script:psRestartScenario) {
+                'RejectFirst' { return $false }
+                'RejectSecond' { return ($script:psRestartConfirmMessages.Count -eq 1) }
+                'AcceptBoth' { return $true }
+            }
+            return $false
+        }
+        Mock Restart-Spooler {
+            param([string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:capturedPsRestartBound = @{} + $PSBoundParameters
+            $script:capturedPsRestartWhatIf = [bool]$WhatIfPreference
+            return [PSCustomObject]@{
+                PSTypeName   = 'SpoolDoctor.ActionResult'
+                ComputerName = 'SRV-PRINT-01'
+                Action       = 'Restart-Spooler'
+                Outcome      = 'OK'
+                Message      = 'Serviço reiniciado no servidor de impressão.'
+                Timestamp    = Get-Date
+            }
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.TargetComboBox.SelectedIndex = 1
+            $ui.CredentialCheckBox.Checked = $true
+
+            $script:psRestartScenario = 'RejectFirst'
+            $script:psRestartConfirmMessages.Clear()
+            Invoke-SpoolDoctorRestart -Form $form
+            $script:psRestartConfirmMessages.Count | Should -Be 1
+            $script:psRestartConfirmMessages[0] | Should -Match 'SERVIDOR DE IMPRESSÃO'
+            $script:psRestartConfirmMessages[0] | Should -Match 'SRV-PRINT-01'
+            Should -Invoke Restart-Spooler -Times 0 -Exactly
+
+            $script:psRestartScenario = 'RejectSecond'
+            $script:psRestartConfirmMessages.Clear()
+            Invoke-SpoolDoctorRestart -Form $form
+            $script:psRestartConfirmMessages.Count | Should -Be 2
+            $script:psRestartConfirmMessages[1] | Should -Match 'CONFIRMAÇÃO REFORÇADA'
+            $script:psRestartConfirmMessages[1] | Should -Match 'SRV-PRINT-01'
+            Should -Invoke Restart-Spooler -Times 0 -Exactly
+
+            $script:psRestartScenario = 'AcceptBoth'
+            $script:psRestartConfirmMessages.Clear()
+            Invoke-SpoolDoctorRestart -Form $form
+            $script:psRestartConfirmMessages.Count | Should -Be 2
+            Should -Invoke Restart-Spooler -Times 1 -Exactly
+            @($script:capturedPsRestartBound['ComputerName']) | Should -Be @('SRV-PRINT-01')
+            ([bool]$script:capturedPsRestartBound['AllowPrintServer']) | Should -BeTrue
+            $script:capturedPsRestartBound['Credential'].UserName | Should -Be 'DOMINIO\operador_restart'
+            $ui.StatusTextBox.Text | Should -Not -Match 'operador_restart'
+
+            # Volta para Local: não repassa -Credential nem -AllowPrintServer
+            $ui.TargetComboBox.SelectedIndex = 0
+            $script:capturedPsRestartBound = $null
+            Invoke-SpoolDoctorRestart -Form $form
+            $script:capturedPsRestartBound.ContainsKey('ComputerName') | Should -BeFalse
+            $script:capturedPsRestartBound.ContainsKey('Credential') | Should -BeFalse
+            $script:capturedPsRestartBound.ContainsKey('AllowPrintServer') | Should -BeFalse
+        }
+        finally {
+            $form.Dispose()
+        }
+    }
+
+    It 'executa Reiniciar serviço em lote sem passar -AllowPrintServer e atualiza grade quando há OK' {
+        Mock Get-SpoolerAllowedComputer {
+            return @(
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'PC-01'; IsPrintServer = $false },
+                [PSCustomObject]@{ PSTypeName = 'SpoolDoctor.AllowedComputer'; ComputerName = 'SRV-PRINT-01'; IsPrintServer = $true }
+            )
+        }
+
+        $script:capturedBatchRestartConfirmMsg = $null
+        $script:capturedBatchRestartBound = $null
+        Mock Confirm-SpoolDoctorAction {
+            param([string]$Title, [string]$Message, [string]$Icon)
+            $script:capturedBatchRestartConfirmMsg = $Message
+            return $true
+        }
+        Mock Restart-Spooler {
+            param([string]$LogPath, [string[]]$ComputerName, [PSCredential]$Credential, [string]$AllowedComputersPath, [switch]$AllowPrintServer)
+            $script:capturedBatchRestartBound = @{} + $PSBoundParameters
+            return @(
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.ActionResult'
+                    ComputerName = 'PC-01'
+                    Action       = 'Restart-Spooler'
+                    Outcome      = 'OK'
+                    Message      = "Spooler reiniciado com sucesso na máquina 'PC-01'."
+                    Timestamp    = [datetime]'2026-11-24T19:10:00'
+                },
+                [PSCustomObject]@{
+                    PSTypeName   = 'SpoolDoctor.ActionResult'
+                    ComputerName = 'SRV-PRINT-01'
+                    Action       = 'Restart-Spooler'
+                    Outcome      = 'Failed'
+                    Message      = "Reinício bloqueado na máquina 'SRV-PRINT-01' (marcada como servidor de impressão)."
+                    Timestamp    = [datetime]'2026-11-24T19:10:01'
+                }
+            )
+        }
+
+        $form = Initialize-SpoolDoctorForm -LogPath $script:logPath
+        try {
+            $ui = $form.Tag
+            $ui.TargetComboBox.SelectedIndex = 3
+
+            Invoke-SpoolDoctorRestart -Form $form
+
+            $script:capturedBatchRestartConfirmMsg | Should -Match 'PC-01'
+            $script:capturedBatchRestartConfirmMsg | Should -Match 'SRV-PRINT-01'
+            $script:capturedBatchRestartConfirmMsg | Should -Match 'PrintServer|Servidor de Impressão'
+            @($script:capturedBatchRestartBound['ComputerName']) | Should -Be @('PC-01', 'SRV-PRINT-01')
+            $script:capturedBatchRestartBound.ContainsKey('AllowPrintServer') | Should -BeFalse
+
+            Should -Invoke Get-SpoolerJob -Times 1 -Exactly
+            $ui.StatusTextBox.Text | Should -Match '\[OK\] \(Restart-Spooler\)'
+            $ui.StatusTextBox.Text | Should -Match '\[Failed\] \(Restart-Spooler\)'
+        }
+        finally {
+            $form.Dispose()
+        }
     }
 }
